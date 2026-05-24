@@ -179,3 +179,46 @@ class DonationPurposeListCreateView(generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         purpose = serializer.save()
         return success_response(DonationPurposeSerializer(purpose).data, status=201)
+
+
+from django.http import HttpResponse
+
+class ExportDonorsExcelView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get(self, request):
+        import openpyxl
+        from django.utils import timezone
+
+        # Create workbook
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Donors"
+
+        # Headers
+        headers = ["Donor ID", "Name", "Phone", "Email", "Club Name", "Tier", "Total Donated"]
+        ws.append(headers)
+
+        qs = DonorProfile.objects.filter(is_deleted=False).select_related(
+            "user", "membership_tier"
+        ).annotate(total_donated_paise=Sum("donations__amount")).order_by("-user__date_joined")
+
+        for profile in qs:
+            total_donated = (profile.total_donated_paise or 0) / 100.0
+            ws.append([
+                profile.donor_id or "",
+                profile.user.name,
+                profile.user.phone,
+                profile.user.email or "",
+                profile.club_name or "",
+                profile.membership_tier.name if profile.membership_tier else "",
+                total_donated,
+            ])
+
+        response = HttpResponse(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = f'attachment; filename="donors_export_{timezone.now().strftime("%Y%m%d%H%M")}.xlsx"'
+        wb.save(response)
+        return response
+

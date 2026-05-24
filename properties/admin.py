@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Room, RoomType
+from .models import Room, RoomImage, RoomType
 
 
 @admin.register(RoomType)
@@ -9,8 +9,14 @@ class RoomTypeAdmin(admin.ModelAdmin):
     search_fields = ("name",)
 
 
+class RoomImageInline(admin.TabularInline):
+    model = RoomImage
+    extra = 0
+
+
 @admin.register(Room)
 class RoomAdmin(admin.ModelAdmin):
+    inlines = [RoomImageInline]
     list_display = (
         "room_number",
         "branch",

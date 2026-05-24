@@ -69,7 +69,11 @@ class StaffOTPVerifySerializer(serializers.Serializer):
 
 
 ADMIN_PERMISSIONS = [
+    "rooms.view",
+    "rooms.create",
+    "rooms.update",
     "bookings.view",
+    "bookings.create",
     "bookings.update_status",
     "bookings.cancel",
     "checkin.manage",
@@ -79,7 +83,11 @@ ADMIN_PERMISSIONS = [
 ]
 
 SUPER_ADMIN_PERMISSIONS = [
+    "rooms.view",
+    "rooms.create",
+    "rooms.update",
     "bookings.view",
+    "bookings.create",
     "bookings.update_status",
     "bookings.cancel",
     "checkin.manage",
@@ -147,3 +155,13 @@ class StaffMeSerializer(serializers.ModelSerializer):
 
 class StaffMeUpdateSerializer(serializers.Serializer):
     name = serializers.CharField(min_length=2, max_length=200)
+
+class StaffManagementSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=200)
+    phone = serializers.CharField(max_length=15)
+    email = serializers.EmailField(required=False, allow_blank=True)
+
+    def validate_phone(self, value: str) -> str:
+        if not is_valid_indian_phone(value):
+            raise serializers.ValidationError("Enter a valid 10-digit Indian mobile number.")
+        return normalize_indian_phone(value)

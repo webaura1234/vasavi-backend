@@ -120,6 +120,7 @@ class RoomSearchView(APIView):
         qs = Room.objects.filter(
             is_deleted=False,
             is_active=True,
+            operational_status="available",
             capacity__gte=data["guests"],
         ).select_related("branch", "room_type")
 

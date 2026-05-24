@@ -44,7 +44,7 @@ from accounts.staff_serializers import (
     StaffOTPVerifySerializer,
 )
 from accounts.views import _issue_jwt_pair
-from permissions import IsAdminOrAbove, IsPublic
+from permissions import IsAdminOrAbove, IsPublic, IsSuperAdmin
 from throttles import StaffOTPVerifyThrottle, StaffOTPSendThrottle
 from utils.responses import error_response, success_response
 from utils.sms import send_otp_sms
@@ -325,3 +325,59 @@ class StaffMeView(generics.RetrieveUpdateAPIView):
 
     def patch(self, request, *args, **kwargs):
         return self.partial_update(request, *args, **kwargs)
+
+
+class StaffManagementView(generics.ListCreateAPIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            from accounts.staff_serializers import StaffManagementSerializer
+            return StaffManagementSerializer
+        from accounts.staff_serializers import StaffMeSerializer
+        return StaffMeSerializer
+
+    def get_queryset(self):
+        return User.objects.filter(role="admin", is_deleted=False).order_by("-date_joined")
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        from utils.responses import paginated_response
+        from accounts.staff_serializers import StaffMeSerializer
+        return paginated_response(queryset, request, StaffMeSerializer)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        phone = serializer.validated_data["phone"]
+        name = serializer.validated_data["name"]
+        email = serializer.validated_data.get("email", "")
+
+        user = User.objects.filter(phone=phone).first()
+        if user:
+            if user.role == "admin":
+                return error_response("ALREADY_EXISTS", "Admin with this phone number already exists.")
+            else:
+                # Upgrade role if needed
+                user.role = "admin"
+                user.name = name
+                user.email = email
+                user.save(update_fields=["role", "name", "email", "updated_at"])
+        else:
+            user = User.objects.create_user(
+                phone=phone,
+                role="admin",
+                name=name,
+                email=email,
+                is_active=True
+            )
+
+        from accounts.tasks import send_staff_invite_sms_task
+        send_staff_invite_sms_task.delay(phone=phone, name=name)
+
+        from accounts.staff_serializers import StaffMeSerializer
+        return success_response(
+            StaffMeSerializer(user, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+            message="Staff member invited successfully."
+        )

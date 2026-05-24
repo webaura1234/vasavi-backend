@@ -116,6 +116,10 @@ def resolve_scope(request: HttpRequest) -> str:
         return request.idempotency_scope
 
     path = request.path
+    if path.startswith("/api/v1/staff/bookings/") or path.startswith(
+        "/api/staff/bookings/"
+    ):
+        return IdempotencyScope.BOOKING_CREATE
     if path.startswith("/api/v1/bookings/") or (
         path.startswith("/api/bookings/") and "webhooks" not in path
     ):

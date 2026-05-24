@@ -155,3 +155,58 @@ class CouponRedeemView(APIView):
             booking.coupons_applied.add(coupon)
 
         return success_response(CouponSerializer(coupon).data)
+
+
+from django.http import HttpResponse
+
+class ExportCouponsExcelView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get(self, request):
+        import openpyxl
+        from django.utils import timezone
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Coupons"
+
+        headers = ["Serial Number", "Type", "Status", "Batch Date", "Donor ID", "Redeemed On", "Redeemed At Branch"]
+        ws.append(headers)
+
+        qs = Coupon.objects.filter(is_deleted=False).select_related(
+            "batch", "batch__donation__donor", "redeemed_at_branch"
+        ).order_by("-created_at")
+
+        for coupon in qs:
+            donor_id = ""
+            if coupon.batch and coupon.batch.donation and coupon.batch.donation.donor:
+                donor_id = coupon.batch.donation.donor.donor_id or ""
+            
+            redeemed_branch = ""
+            if coupon.redeemed_at_branch:
+                redeemed_branch = coupon.redeemed_at_branch.name
+
+            redeemed_on = ""
+            if coupon.redeemed_on:
+                redeemed_on = coupon.redeemed_on.strftime("%Y-%m-%d %H:%M:%S")
+
+            batch_date = ""
+            if coupon.batch and coupon.batch.created_at:
+                batch_date = coupon.batch.created_at.strftime("%Y-%m-%d %H:%M:%S")
+
+            ws.append([
+                coupon.serial_number,
+                coupon.get_coupon_type_display(),
+                coupon.get_status_display(),
+                batch_date,
+                donor_id,
+                redeemed_on,
+                redeemed_branch,
+            ])
+
+        response = HttpResponse(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = f'attachment; filename="coupons_export_{timezone.now().strftime("%Y%m%d%H%M")}.xlsx"'
+        wb.save(response)
+        return response

@@ -442,10 +442,12 @@ IDEMPOTENCY_RETRY_AFTER_SECONDS = env.int("IDEMPOTENCY_RETRY_AFTER_SECONDS", def
 IDEMPOTENCY_PROTECTED_PREFIXES = [
     "/api/v1/accounts/",
     "/api/v1/bookings/",
+    "/api/v1/staff/bookings/",
     "/api/v1/donors/",
     "/api/v1/coupons/",
     "/api/accounts/",
     "/api/bookings/",
+    "/api/staff/bookings/",
     "/api/donors/",
     "/api/coupons/",
 ]

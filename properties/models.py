@@ -88,6 +88,20 @@ class Room(SoftDeleteModel):
         default=True,
         help_text="Inactive rooms are hidden from availability searches.",
     )
+    operational_status = models.CharField(
+        max_length=20,
+        choices=[
+            ("available", "Available"),
+            ("blocked", "Blocked"),
+            ("maintenance", "Maintenance"),
+        ],
+        default="available",
+        help_text="Staff-managed availability (separate from booking occupancy).",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional notes shown to staff (amenities, view, etc.).",
+    )
 
     # -- managers ----------------------------------------------------------
     objects = SoftDeleteManager()
@@ -117,3 +131,28 @@ class Room(SoftDeleteModel):
             f"{self.room_number} ({self.room_type.name}) "
             f"@ {self.branch.name}"
         )
+
+
+class RoomImage(TimeStampedModel):
+    """Photo attached to a room for staff and guest-facing listings."""
+
+    room = models.ForeignKey(
+        Room,
+        on_delete=models.CASCADE,
+        related_name="images",
+    )
+    image = models.ImageField(
+        upload_to="rooms/%Y/%m/",
+        help_text="Room photo (JPEG, PNG, or WebP).",
+    )
+    caption = models.CharField(max_length=200, blank=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_primary = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "room image"
+        verbose_name_plural = "room images"
+        ordering = ["sort_order", "created_at"]
+
+    def __str__(self) -> str:
+        return f"Image for {self.room.room_number}"
