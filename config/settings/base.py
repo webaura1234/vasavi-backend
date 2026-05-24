@@ -152,8 +152,8 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "anon": "60/minute",
-        "user": "300/minute",
+        "anon": "120/minute",
+        "user": "1200/minute",
         "otp_send": "5/hour",
         "otp_verify": "3/10minute",
         "staff_otp_send": "5/hour",
@@ -161,7 +161,7 @@ REST_FRAMEWORK = {
         "booking_create": "10/hour",
         "payment": "20/hour",
     },
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "DEFAULT_PAGINATION_CLASS": "utils.pagination.VasaviPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",

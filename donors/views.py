@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from django.db.models import Q
+from django.db.models import Q, Sum
 from rest_framework import generics
 from rest_framework.views import APIView
 
@@ -48,8 +48,10 @@ class DonorListCreateView(generics.ListCreateAPIView):
         return [IsSuperAdmin()]
 
     def get_queryset(self):
-        qs = DonorProfile.objects.filter(is_deleted=False).select_related(
-            "user", "membership_tier", "for_place"
+        qs = (
+            DonorProfile.objects.filter(is_deleted=False)
+            .select_related("user", "membership_tier", "for_place")
+            .annotate(total_donated_paise=Sum("donations__amount"))
         )
         tier_id = self.request.query_params.get("tier_id")
         club_name = self.request.query_params.get("club_name")

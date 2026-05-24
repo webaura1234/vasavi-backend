@@ -71,6 +71,13 @@ class CouponListView(generics.ListAPIView):
         if serial:
             qs = qs.filter(serial_number=serial)
 
+        donor_profile_id = self.request.query_params.get("donor_profile_id")
+        if donor_profile_id:
+            qs = qs.filter(
+                Q(batch__donation__donor_id=donor_profile_id)
+                | Q(assigned_donors__donor_profile__pk=donor_profile_id)
+            ).distinct()
+
         return qs.order_by("serial_number")
 
     def list(self, request, *args, **kwargs):

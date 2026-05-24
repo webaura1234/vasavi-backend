@@ -99,11 +99,9 @@ class DonationCreateSerializer(serializers.Serializer):
 
     def validate_donor_id(self, value):
         try:
-            user = User.objects.get(pk=value, role="donor", is_deleted=False)
-        except User.DoesNotExist as exc:
-            raise serializers.ValidationError("Donor user not found.") from exc
-        try:
-            return DonorProfile.objects.get(user=user, is_deleted=False)
+            return DonorProfile.objects.select_related("user").get(
+                pk=value, is_deleted=False
+            )
         except DonorProfile.DoesNotExist as exc:
             raise serializers.ValidationError("Donor profile not found.") from exc
 
@@ -141,6 +139,7 @@ class DonationCreateSerializer(serializers.Serializer):
 
 class DonorProfileSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
+    user_id = serializers.UUIDField(source="user.id", read_only=True)
     phone = serializers.CharField(source="user.phone", read_only=True)
     name = serializers.CharField(source="user.name", read_only=True)
     tier = MembershipTierSerializer(source="membership_tier", read_only=True)
@@ -155,6 +154,7 @@ class DonorProfileSerializer(serializers.ModelSerializer):
         model = DonorProfile
         fields = (
             "id",
+            "user_id",
             "phone",
             "name",
             "donor_id",
@@ -208,6 +208,24 @@ def _generate_donor_id() -> str:
     return candidate
 
 
+class InitialDonationInputSerializer(serializers.Serializer):
+    amount_paise = serializers.IntegerField(min_value=1)
+    purpose_id = serializers.UUIDField()
+    receipt_numbers = serializers.ListField(
+        child=serializers.CharField(max_length=50),
+        allow_empty=False,
+    )
+    dispatch_date = serializers.DateField(required=False, allow_null=True)
+    dispatch_method = serializers.CharField(required=False, allow_blank=True)
+    dispatch_notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_purpose_id(self, value):
+        try:
+            return DonationPurpose.objects.get(pk=value, is_active=True)
+        except DonationPurpose.DoesNotExist as exc:
+            raise serializers.ValidationError("Purpose not found.") from exc
+
+
 class DonorCreateSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=15)
     name = serializers.CharField(min_length=2, max_length=200)
@@ -216,6 +234,7 @@ class DonorCreateSerializer(serializers.Serializer):
     district_code = serializers.CharField(required=False, allow_blank=True)
     club_name = serializers.CharField(required=False, allow_blank=True)
     for_place_id = serializers.UUIDField()
+    initial_donation = InitialDonationInputSerializer(required=False)
 
     def validate_phone(self, value):
         if not is_valid_indian_phone(value):
@@ -241,9 +260,12 @@ class DonorCreateSerializer(serializers.Serializer):
         return branch
 
     def create(self, validated_data):
+        initial_donation = validated_data.pop("initial_donation", None)
         donor_id = (validated_data.get("donor_id") or "").strip() or _generate_donor_id()
         if DonorProfile.all_objects.filter(donor_id=donor_id).exists():
             raise serializers.ValidationError({"donor_id": "Donor ID already exists."})
+
+        request = self.context["request"]
 
         with transaction.atomic():
             user = User.objects.create_user(
@@ -264,6 +286,25 @@ class DonorCreateSerializer(serializers.Serializer):
                 club_name=validated_data.get("club_name", ""),
                 for_place=validated_data["for_place_id"],
             )
+
+            if initial_donation:
+                purpose = initial_donation["purpose_id"]
+                donation = Donation.objects.create(
+                    donor=profile,
+                    amount=initial_donation["amount_paise"],
+                    purpose=purpose,
+                    dispatch_date=initial_donation.get("dispatch_date"),
+                    dispatch_method=initial_donation.get("dispatch_method", ""),
+                    dispatch_notes=initial_donation.get("dispatch_notes", ""),
+                    created_by=request.user,
+                )
+                ReceiptNumber.objects.bulk_create(
+                    [
+                        ReceiptNumber(donation=donation, receipt_number=num.strip())
+                        for num in initial_donation["receipt_numbers"]
+                        if num.strip()
+                    ]
+                )
         return profile
 
 
@@ -273,6 +314,8 @@ class DonorListSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source="user.name", read_only=True)
     tier = serializers.CharField(source="membership_tier.name", read_only=True)
     city = serializers.SerializerMethodField()
+    total_donated_paise = serializers.IntegerField(read_only=True)
+    total_donated_display = serializers.SerializerMethodField()
 
     class Meta:
         model = DonorProfile
@@ -284,12 +327,18 @@ class DonorListSerializer(serializers.ModelSerializer):
             "tier",
             "club_name",
             "city",
+            "total_donated_paise",
+            "total_donated_display",
             "date_joined",
         )
         read_only_fields = fields
 
     def get_city(self, obj: DonorProfile) -> str:
         return obj.for_place.city if obj.for_place else ""
+
+    def get_total_donated_display(self, obj: DonorProfile) -> str:
+        total = getattr(obj, "total_donated_paise", None) or 0
+        return paise_to_rupees_display(int(total))
 
     date_joined = serializers.DateTimeField(source="user.date_joined", read_only=True)
 
