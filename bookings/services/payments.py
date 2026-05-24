@@ -97,15 +97,22 @@ def confirm_booking_payment(
     return booking
 
 
-def confirm_cash_payment(booking: Booking, *, changed_by, notes: str = "") -> Booking:
+def confirm_cash_payment(
+    booking: Booking,
+    *,
+    changed_by,
+    notes: str = "",
+    payment_reference: str = "",
+) -> Booking:
     """Record an in-person / pay-at-desk cash payment."""
+    ref = payment_reference.strip() if payment_reference.strip() else _cash_reference()
     reason = "Cash payment recorded"
     if notes.strip():
         reason = f"{reason}: {notes.strip()}"
     return confirm_booking_payment(
         booking,
         gateway=Booking.PaymentGateway.CASH,
-        payment_reference=_cash_reference(),
+        payment_reference=ref,
         changed_by=changed_by,
         reason=reason,
     )

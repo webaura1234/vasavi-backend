@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import secrets
 import string
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from core.models import (
@@ -52,6 +53,7 @@ class Booking(SoftDeleteModel):
     class PaymentStatus(models.TextChoices):
         UNPAID = "unpaid", "Unpaid"
         PAID = "paid", "Paid"
+        REFUND_PENDING = "refund_pending", "Refund Pending"
         REFUNDED = "refunded", "Refunded"
         PARTIALLY_REFUNDED = "partially_refunded", "Partially Refunded"
 
@@ -59,6 +61,13 @@ class Booking(SoftDeleteModel):
         RAZORPAY = "razorpay", "Razorpay"
         CASH = "cash", "Cash"
         OTHER = "other", "Other"
+
+    class CancelRole(models.TextChoices):
+        USER = "user", "User"
+        DONOR = "donor", "Donor"
+        ADMIN = "admin", "Admin"
+        SUPER_ADMIN = "super_admin", "Super Admin"
+        SYSTEM = "system", "System (auto-expired)"
 
     # -- fields --------------------------------------------------------------
 
@@ -118,7 +127,7 @@ class Booking(SoftDeleteModel):
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
-        default=Status.PENDING,
+        default=Status.CONFIRMED,
         db_index=True,
     )
     base_amount = models.BigIntegerField(
@@ -141,7 +150,7 @@ class Booking(SoftDeleteModel):
     payment_reference = models.CharField(
         max_length=200,
         blank=True,
-        help_text="Razorpay or other gateway order/payment ID.",
+        help_text="Cash receipt number or other payment reference.",
     )
     payment_gateway = models.CharField(
         max_length=20,
@@ -152,6 +161,14 @@ class Booking(SoftDeleteModel):
         null=True,
         blank=True,
         help_text="Timestamp when payment was confirmed.",
+    )
+
+    # -- razorpay (dormant — activated when RAZORPAY_ENABLED=True) ----------
+
+    razorpay_order_id = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Razorpay order ID (separate from payment ID).",
     )
 
     # -- coupons & notes -----------------------------------------------------
@@ -175,6 +192,59 @@ class Booking(SoftDeleteModel):
     )
     cancellation_reason = models.TextField(
         blank=True,
+    )
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_bookings",
+        help_text="The user who triggered the cancellation.",
+    )
+    cancel_initiated_by_role = models.CharField(
+        max_length=20,
+        choices=CancelRole.choices,
+        blank=True,
+        help_text="Role of the actor who cancelled (user/admin/super_admin/system).",
+    )
+
+    # -- refund tracking (cash refunds — Razorpay deferred) -----------------
+
+    refund_amount = models.BigIntegerField(
+        default=0,
+        help_text="Amount refunded in paise. 0 = no refund yet.",
+    )
+    refund_reference = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Cash receipt/reference for the refund.",
+    )
+    refund_processed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the refund was processed.",
+    )
+    refund_reason = models.TextField(
+        blank=True,
+        help_text="Reason provided when processing the refund.",
+    )
+    refund_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the guest submitted the refund request.",
+    )
+    refund_requested_reason = models.TextField(
+        blank=True,
+        help_text="Guest's stated reason for requesting a refund.",
+    )
+
+    # -- TTL for PENDING bookings -------------------------------------------
+
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Auto-cancel PENDING+UNPAID booking if still unresolved after this time.",
     )
 
     # -- managers ------------------------------------------------------------
@@ -201,6 +271,14 @@ class Booking(SoftDeleteModel):
                 fields=["check_in_date", "check_out_date"],
                 name="idx_booking_dates",
             ),
+            models.Index(
+                fields=["status", "expires_at"],
+                name="idx_booking_status_expires",
+            ),
+            models.Index(
+                fields=["payment_status"],
+                name="idx_booking_payment_status",
+            ),
         ]
         constraints = [
             models.CheckConstraint(
@@ -219,6 +297,10 @@ class Booking(SoftDeleteModel):
                 check=Q(final_amount__gte=0),
                 name="booking_final_amount_non_negative",
             ),
+            models.CheckConstraint(
+                check=Q(refund_amount__gte=0),
+                name="booking_refund_amount_non_negative",
+            ),
         ]
 
     # -- str -----------------------------------------------------------------
@@ -236,24 +318,29 @@ class Booking(SoftDeleteModel):
         random_part = "".join(secrets.choice(charset) for _ in range(5))
         return f"VCI-{year}-{random_part}"
 
+    # -- helpers -------------------------------------------------------------
+
+    @property
+    def is_cancellable_by_guest(self) -> bool:
+        """Guest can cancel only if not yet checked in and still active."""
+        return self.status in (self.Status.CONFIRMED, self.Status.PENDING) and (
+            self.check_in_date > timezone.localdate()
+        )
+
+    @property
+    def needs_refund_approval(self) -> bool:
+        """True if a guest refund request is awaiting staff action."""
+        return (
+            self.payment_status == self.PaymentStatus.REFUND_PENDING
+            and self.refund_requested_at is not None
+        )
+
     # -- validation ----------------------------------------------------------
 
     def clean(self) -> None:
-        """Validate booking business rules.
-
-        * ``check_out_date`` must be after ``check_in_date``.
-        * ``nights`` must be positive.
-        * ``final_amount`` must equal ``base_amount - discount_amount``.
-
-        .. note::
-           M2M coupon validation (coupon status, assigned-donor checks)
-           cannot be performed in ``clean()`` because the M2M relationship
-           is saved *after* the model instance.  Use :meth:`validate_coupons`
-           explicitly after saving the M2M.
-        """
+        """Validate booking business rules."""
         super().clean()
 
-        # Date sanity
         if self.check_in_date and self.check_out_date:
             if self.check_out_date <= self.check_in_date:
                 raise ValidationError(
@@ -270,7 +357,6 @@ class Booking(SoftDeleteModel):
                     {"nights": "Number of nights must be greater than zero."}
                 )
 
-        # Financial consistency
         if (
             self.base_amount is not None
             and self.discount_amount is not None
@@ -290,18 +376,7 @@ class Booking(SoftDeleteModel):
     def validate_coupons(self) -> None:
         """Validate all coupons in ``coupons_applied``.
 
-        This method must be called **after** the M2M relationship has been
-        saved (i.e. after ``booking.coupons_applied.set(...)``).
-
-        Checks:
-        1. Each coupon must be in ``dispatched`` status.
-        2. If a coupon has ``assigned_donors``, the booking user must be
-           in that list.
-
-        Raises
-        ------
-        ValidationError
-            If any coupon fails validation.
+        Must be called **after** M2M is saved.
         """
         errors = []
         for coupon in self.coupons_applied.all():
@@ -326,7 +401,7 @@ class Booking(SoftDeleteModel):
     # -- save ----------------------------------------------------------------
 
     def save(self, *args, **kwargs) -> None:
-        """Auto-generate reference, denormalise branch, compute nights, then persist."""
+        """Auto-generate reference, denormalise branch, compute nights, set TTL, then persist."""
 
         # Auto-generate booking reference (retry on collision)
         if not self.booking_reference:
@@ -347,6 +422,11 @@ class Booking(SoftDeleteModel):
         # Compute nights
         if self.check_in_date and self.check_out_date:
             self.nights = (self.check_out_date - self.check_in_date).days
+
+        # Set TTL for PENDING bookings on first create (UUID pk is set before insert).
+        if self._state.adding and self.status == Booking.Status.PENDING and not self.expires_at:
+            expiry_minutes = getattr(settings, "BOOKING_PENDING_EXPIRY_MINUTES", 15)
+            self.expires_at = timezone.now() + timedelta(minutes=expiry_minutes)
 
         self.full_clean()
         super().save(*args, **kwargs)

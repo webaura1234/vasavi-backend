@@ -10,12 +10,23 @@ from accounts.staff_views import (
     StaffOTPVerifyView,
     StaffTokenRefreshView,
 )
-from bookings.staff_views import StaffBookingRefundView, StaffManualBookingCreateView
+from bookings.staff_analytics_views import (
+    StaffDashboardAnalyticsView,
+    StaffDonorAnalyticsView,
+    StaffFinanceAnalyticsView,
+    StaffReportsAnalyticsView,
+)
+from bookings.staff_views import (
+    StaffBookingRefundView,
+    StaffManualBookingCreateView,
+    StaffRefundApprovalView,
+)
 from properties.staff_views import (
     StaffRoomDetailView,
     StaffRoomImageDeleteView,
     StaffRoomImageUploadView,
     StaffRoomListCreateView,
+    StaffRoomOperationalStatusView,
     StaffRoomSearchView,
 )
 
@@ -28,15 +39,50 @@ urlpatterns = [
     path("logout/", StaffLogoutView.as_view(), name="staff-logout"),
     path("me/", StaffMeView.as_view(), name="staff-me"),
     path("admins/", StaffManagementView.as_view(), name="staff-admins"),
+    path(
+        "analytics/dashboard/",
+        StaffDashboardAnalyticsView.as_view(),
+        name="staff-analytics-dashboard",
+    ),
+    path(
+        "analytics/reports/",
+        StaffReportsAnalyticsView.as_view(),
+        name="staff-analytics-reports",
+    ),
+    path(
+        "analytics/finance/",
+        StaffFinanceAnalyticsView.as_view(),
+        name="staff-analytics-finance",
+    ),
+    path(
+        "analytics/donors/",
+        StaffDonorAnalyticsView.as_view(),
+        name="staff-analytics-donors",
+    ),
     path("bookings/", StaffManualBookingCreateView.as_view(), name="staff-bookings-create"),
     path(
         "bookings/<uuid:pk>/refund/",
         StaffBookingRefundView.as_view(),
         name="staff-booking-refund",
     ),
+    path(
+        "bookings/refund-requests/",
+        StaffRefundApprovalView.as_view(),
+        name="staff-refund-requests",
+    ),
+    path(
+        "bookings/<uuid:pk>/refund-approval/",
+        StaffRefundApprovalView.as_view(),
+        name="staff-refund-approval",
+    ),
     path("rooms/", StaffRoomListCreateView.as_view(), name="staff-rooms"),
     path("rooms/search/", StaffRoomSearchView.as_view(), name="staff-rooms-search"),
     path("rooms/<uuid:pk>/", StaffRoomDetailView.as_view(), name="staff-room-detail"),
+    path(
+        "rooms/<uuid:pk>/operational-status/",
+        StaffRoomOperationalStatusView.as_view(),
+        name="staff-room-operational-status",
+    ),
     path(
         "rooms/<uuid:pk>/images/",
         StaffRoomImageUploadView.as_view(),

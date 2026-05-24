@@ -172,8 +172,14 @@ REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "utils.exceptions.custom_exception_handler",
 }
 
-# Guest-facing cash checkout (main site). Staff can always record cash via the portal.
-CASH_CHECKOUT_ENABLED = env.bool("CASH_CHECKOUT_ENABLED", default=DEBUG)
+# Guest-facing cash checkout — always on (Razorpay deferred).
+CASH_CHECKOUT_ENABLED = env.bool("CASH_CHECKOUT_ENABLED", default=True)
+
+# Razorpay — disabled until credentials are provisioned.
+RAZORPAY_ENABLED = env.bool("RAZORPAY_ENABLED", default=False)
+
+# PENDING booking TTL in minutes. After this, Celery auto-cancels unpaid bookings.
+BOOKING_PENDING_EXPIRY_MINUTES = env.int("BOOKING_PENDING_EXPIRY_MINUTES", default=15)
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
@@ -385,6 +391,7 @@ CELERY_TASK_REJECT_ON_WORKER_LOST = True
 
 CELERY_TASK_ROUTES = {
     "accounts.tasks.cleanup_expired_otps": {"queue": "maintenance"},
+    "bookings.tasks.expire_pending_bookings": {"queue": "maintenance"},
     "bookings.tasks.razorpay_create_order": {"queue": "payments"},
     "bookings.tasks.razorpay_verify_payment_webhook": {"queue": "payments"},
     "bookings.tasks.send_booking_confirmation": {"queue": "notifications"},
@@ -400,6 +407,10 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup-expired-otps-hourly": {
         "task": "accounts.tasks.cleanup_expired_otps",
         "schedule": 3600.0,
+    },
+    "expire-pending-bookings-every-5min": {
+        "task": "bookings.tasks.expire_pending_bookings",
+        "schedule": 300.0,  # every 5 minutes
     },
 }
 

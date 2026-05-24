@@ -61,6 +61,18 @@ def _validation_fields(exc: ValidationError) -> dict[str, list[str]]:
     return {"non_field_errors": [str(detail)]}
 
 
+def _validation_message(fields: dict[str, list[str]]) -> str:
+    """Human-readable summary for toasts and clients that only read ``error.message``."""
+    messages: list[str] = []
+    for msgs in fields.values():
+        messages.extend(msgs)
+    if not messages:
+        return "Validation failed."
+    if len(messages) == 1:
+        return messages[0]
+    return "; ".join(messages)
+
+
 def custom_exception_handler(exc: Exception, context: dict[str, Any]) -> Response | None:
     """Map DRF/Django exceptions to the Vasavi API error format."""
     if isinstance(exc, Http404):
@@ -101,7 +113,7 @@ def custom_exception_handler(exc: Exception, context: dict[str, Any]) -> Respons
             response.data = _build_error(code, message)
             return response
         fields = _validation_fields(exc)
-        message = "Validation failed."
+        message = _validation_message(fields)
     elif isinstance(exc, Throttled):
         message = str(exc.detail) if exc.detail else "Too many requests."
         code = "RATE_LIMITED"

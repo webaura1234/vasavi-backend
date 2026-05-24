@@ -1,16 +1,12 @@
-"""Booking API views and Razorpay webhook handler."""
+"""Booking API views."""
 
 from __future__ import annotations
 
-import json
 import logging
 
 from django.conf import settings
 from django.db import transaction
-from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
 from rest_framework import generics
 from rest_framework.views import APIView
 
@@ -19,15 +15,14 @@ from bookings.models import Booking, BookingStatusLog
 from bookings.serializers import (
     BookingCreateSerializer,
     BookingExtendStaySerializer,
+    BookingGuestConfirmSerializer,
+    BookingRefundRequestSerializer,
     BookingSerializer,
     BookingStatusLogSerializer,
     BookingStatusUpdateSerializer,
     CashPaymentSerializer,
-    PaymentOrderSerializer,
 )
-from bookings.tasks import razorpay_create_order
 from bookings.services.payments import confirm_booking_payment, confirm_cash_payment
-from bookings.services.razorpay import RazorpayError, create_order_for_booking
 from coupons.models import Coupon
 from permissions import IsAdminOrAbove
 from rest_framework.permissions import IsAuthenticated as PermIsAuthenticated
@@ -58,8 +53,6 @@ class BookingListCreateView(generics.ListCreateAPIView):
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.request.method == "POST":
-            return [PermIsAuthenticated()]
         return [PermIsAuthenticated()]
 
     def get_throttles(self):
@@ -134,7 +127,22 @@ class BookingStatusUpdateView(APIView):
         with transaction.atomic():
             old_status = booking.status
             booking.status = new_status
-            booking.save(update_fields=["status", "updated_at"])
+
+            # Track who cancelled
+            if new_status == Booking.Status.CANCELLED:
+                booking.cancelled_at = timezone.now()
+                booking.cancellation_reason = reason
+                booking.cancelled_by = request.user
+                booking.cancel_initiated_by_role = request.user.role
+                booking.save(update_fields=[
+                    "status", "cancelled_at", "cancellation_reason",
+                    "cancelled_by", "cancel_initiated_by_role", "updated_at",
+                ])
+                # Revert coupons
+                _revert_booking_coupons(booking)
+            else:
+                booking.save(update_fields=["status", "updated_at"])
+
             BookingStatusLog.objects.create(
                 booking=booking,
                 from_status=old_status,
@@ -227,17 +235,28 @@ class BookingExtendStayView(APIView):
 
 
 class BookingCancelView(APIView):
+    """
+    Guest-facing cancellation. Guests can cancel only before check-in date.
+    - UNPAID bookings → cancelled immediately, coupons reverted.
+    - PAID bookings → cancelled + payment_status set to REFUND_PENDING
+      (guest's refund request must be approved by staff).
+    """
+
     permission_classes = [PermIsAuthenticated]
 
     def post(self, request, pk):
         try:
-            booking = Booking.objects.get(pk=pk, is_deleted=False)
+            booking = Booking.objects.select_related("branch").get(pk=pk, is_deleted=False)
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
 
         user = request.user
+
+        # Ownership check for regular users
         if user.role in ("user", "donor") and booking.user_id != user.pk:
             return error_response("PERMISSION_DENIED", "Not your booking.", status=403)
+
+        # Branch scope for admins
         if user.role == "admin":
             try:
                 if booking.branch_id != user.admin_branch.branch_id:
@@ -245,6 +264,7 @@ class BookingCancelView(APIView):
             except AdminBranch.DoesNotExist:
                 return error_response("PERMISSION_DENIED", "No branch assigned.", status=403)
 
+        # Only cancellable if PENDING or CONFIRMED
         if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
             return error_response(
                 "VALIDATION_ERROR",
@@ -252,7 +272,16 @@ class BookingCancelView(APIView):
                 status=400,
             )
 
-        reason = request.data.get("reason", "")
+        # Guests cannot cancel after check-in date
+        if user.role in ("user", "donor") and booking.check_in_date <= timezone.localdate():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Cancellations are only allowed before the check-in date. "
+                "Please contact the property desk.",
+                status=400,
+            )
+
+        reason = (request.data.get("reason") or "").strip()
         if not reason:
             return error_response(
                 "VALIDATION_ERROR",
@@ -267,27 +296,31 @@ class BookingCancelView(APIView):
             booking.status = Booking.Status.CANCELLED
             booking.cancelled_at = timezone.now()
             booking.cancellation_reason = reason
-            booking.save(
-                update_fields=[
-                    "status",
-                    "cancelled_at",
-                    "cancellation_reason",
-                    "updated_at",
-                ]
-            )
+            booking.cancelled_by = user
+            booking.cancel_initiated_by_role = user.role
 
-            coupon_ids = list(
-                booking.coupons_applied.values_list("pk", flat=True)
-            )
-            if coupon_ids:
-                Coupon.objects.filter(pk__in=coupon_ids).update(
-                    status=Coupon.Status.DISPATCHED,
-                    redeemed_by=None,
-                    redeemed_at_booking=None,
-                    redeemed_at_branch=None,
-                    redeemed_on=None,
-                )
-                booking.coupons_applied.clear()
+            # If the booking was paid, put refund in pending state
+            if booking.payment_status == Booking.PaymentStatus.PAID:
+                booking.payment_status = Booking.PaymentStatus.REFUND_PENDING
+                booking.refund_requested_at = timezone.now()
+                booking.refund_requested_reason = reason
+                save_fields = [
+                    "status", "cancelled_at", "cancellation_reason",
+                    "cancelled_by", "cancel_initiated_by_role",
+                    "payment_status", "refund_requested_at",
+                    "refund_requested_reason", "updated_at",
+                ]
+            else:
+                save_fields = [
+                    "status", "cancelled_at", "cancellation_reason",
+                    "cancelled_by", "cancel_initiated_by_role", "updated_at",
+                ]
+
+            booking.save(update_fields=save_fields)
+
+            # Revert coupons (only if payment wasn't made)
+            if booking.payment_status != Booking.PaymentStatus.PAID:
+                _revert_booking_coupons(booking)
 
             BookingStatusLog.objects.create(
                 booking=booking,
@@ -297,18 +330,17 @@ class BookingCancelView(APIView):
                 reason=reason,
             )
 
-            if booking.payment_status == Booking.PaymentStatus.PAID:
-                logger.warning(
-                    "Paid booking %s cancelled — manual refund may be required.",
-                    booking.booking_reference,
-                )
-
+        booking.refresh_from_db()
         return success_response(BookingSerializer(booking).data)
 
 
-class BookingPaymentOrderView(APIView):
+class BookingRefundRequestView(APIView):
+    """
+    Guest submits a refund request for a cancelled paid booking.
+    Sets payment_status = REFUND_PENDING for staff to process.
+    """
+
     permission_classes = [PermIsAuthenticated]
-    throttle_classes = [PaymentThrottle]
 
     def post(self, request, pk):
         try:
@@ -316,92 +348,117 @@ class BookingPaymentOrderView(APIView):
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
 
-        if booking.user_id != request.user.pk and request.user.role not in (
-            "admin",
-            "super_admin",
+        if booking.user_id != request.user.pk and request.user.role not in ("admin", "super_admin"):
+            return error_response("PERMISSION_DENIED", "Not your booking.", status=403)
+
+        if booking.status != Booking.Status.CANCELLED:
+            return error_response(
+                "VALIDATION_ERROR",
+                "Refund requests can only be submitted for cancelled bookings.",
+                status=400,
+            )
+
+        if booking.payment_status not in (
+            Booking.PaymentStatus.PAID,
+            Booking.PaymentStatus.REFUND_PENDING,
         ):
-            return error_response("PERMISSION_DENIED", "Not allowed.", status=403)
-
-        if booking.status != Booking.Status.PENDING:
             return error_response(
                 "VALIDATION_ERROR",
-                "Payment can only be initiated for pending bookings.",
-                status=400,
-            )
-        if booking.payment_status != Booking.PaymentStatus.UNPAID:
-            return error_response(
-                "VALIDATION_ERROR",
-                "Booking is already paid or refunded.",
+                "No payment to refund.",
                 status=400,
             )
 
-        # Zero payable amount (e.g. free coupon) — skip Razorpay, confirm immediately.
-        if booking.final_amount <= 0:
-            confirm_booking_payment(
-                booking,
-                gateway=Booking.PaymentGateway.OTHER,
-                payment_reference="COMPLIMENTARY",
+        if booking.payment_status == Booking.PaymentStatus.REFUND_PENDING:
+            return error_response(
+                "VALIDATION_ERROR",
+                "A refund request has already been submitted. Please wait for staff to process it.",
+                status=400,
+            )
+
+        serializer = BookingRefundRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            booking = Booking.objects.select_for_update().get(pk=booking.pk)
+            booking.payment_status = Booking.PaymentStatus.REFUND_PENDING
+            booking.refund_requested_at = timezone.now()
+            booking.refund_requested_reason = serializer.validated_data["reason"]
+            booking.save(update_fields=[
+                "payment_status", "refund_requested_at",
+                "refund_requested_reason", "updated_at",
+            ])
+            BookingStatusLog.objects.create(
+                booking=booking,
+                from_status=booking.status,
+                to_status=booking.status,
                 changed_by=request.user,
-                reason="Complimentary booking — payment not required",
-                amount_paise=0,
-            )
-            booking.refresh_from_db()
-            return success_response(
-                {
-                    "order_id": None,
-                    "amount_paise": 0,
-                    "currency": settings.RAZORPAY_CURRENCY,
-                    "razorpay_key_id": settings.RAZORPAY_KEY_ID,
-                    "booking_reference": booking.booking_reference,
-                }
+                reason=f"Refund requested: {serializer.validated_data['reason']}",
             )
 
+        booking.refresh_from_db()
+        return success_response(BookingSerializer(booking).data)
+
+
+class BookingPaymentOrderView(APIView):
+    """Razorpay order creation — gated behind RAZORPAY_ENABLED flag."""
+
+    permission_classes = [PermIsAuthenticated]
+    throttle_classes = [PaymentThrottle]
+
+    def post(self, request, pk):
+        if not getattr(settings, "RAZORPAY_ENABLED", False):
+            return error_response(
+                "NOT_IMPLEMENTED",
+                "Online payments are not available. Please pay at the property desk.",
+                status=503,
+            )
+        # (Razorpay implementation kept dormant — activate when RAZORPAY_ENABLED=True)
+        return error_response("NOT_IMPLEMENTED", "Razorpay not configured.", status=503)
+
+
+class BookingGuestConfirmView(APIView):
+    """Guest finalizes a pending hold (confirmed, pay at property)."""
+
+    permission_classes = [PermIsAuthenticated]
+    throttle_classes = [BookingCreateThrottle]
+
+    def post(self, request, pk):
         try:
-            async_result = razorpay_create_order.delay(str(booking.pk))
-            order_data = async_result.get(timeout=20)
-        except Exception:
-            try:
-                order_data = create_order_for_booking(booking.pk)
-            except RazorpayError as exc:
-                return error_response("SERVER_ERROR", str(exc), status=502)
+            booking = _booking_queryset_for_user(request.user).get(pk=pk)
+        except Booking.DoesNotExist:
+            return error_response("NOT_FOUND", "Booking not found.", status=404)
 
-        payload = {
-            "order_id": order_data["order_id"],
-            "amount_paise": order_data["amount"],
-            "currency": order_data.get("currency", settings.RAZORPAY_CURRENCY),
-            "razorpay_key_id": settings.RAZORPAY_KEY_ID,
-            "booking_reference": booking.booking_reference,
-        }
-        return success_response(PaymentOrderSerializer(payload).data)
+        if request.user.role not in ("user", "donor"):
+            return error_response(
+                "PERMISSION_DENIED",
+                "Only guests can confirm reservations through this endpoint.",
+                status=403,
+            )
 
-
-def _user_may_access_booking(user, booking: Booking) -> bool:
-    if booking.user_id == user.pk:
-        return True
-    if user.role in ("admin", "super_admin"):
-        if user.role == "super_admin":
-            return True
-        try:
-            branch_id = user.admin_branch.branch_id
-        except AdminBranch.DoesNotExist:
-            return False
-        return booking.branch_id == branch_id
-    return False
+        serializer = BookingGuestConfirmSerializer(
+            data=request.data,
+            context={"request": request, "booking": booking},
+        )
+        serializer.is_valid(raise_exception=True)
+        booking = serializer.save()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
+        return success_response(BookingSerializer(booking).data)
 
 
 class BookingCashPaymentView(APIView):
-    """Confirm a pending booking with cash (guest checkout or staff at desk)."""
+    """Confirm a pending/confirmed booking with cash (staff at desk)."""
 
     permission_classes = [PermIsAuthenticated]
     throttle_classes = [PaymentThrottle]
 
     def post(self, request, pk):
         user = request.user
-        guest_roles = ("user", "donor")
-        if user.role in guest_roles and not getattr(settings, "CASH_CHECKOUT_ENABLED", False):
+
+        # Only staff can record cash payments (guests pay at desk)
+        if user.role in ("user", "donor"):
             return error_response(
                 "PERMISSION_DENIED",
-                "Cash checkout is not enabled.",
+                "Cash payment must be recorded by property staff.",
                 status=403,
             )
 
@@ -410,19 +467,24 @@ class BookingCashPaymentView(APIView):
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
 
-        if not _user_may_access_booking(user, booking):
-            return error_response("PERMISSION_DENIED", "Not allowed.", status=403)
+        # Branch scope for admins
+        if user.role == "admin":
+            try:
+                if booking.branch_id != user.admin_branch.branch_id:
+                    return error_response("PERMISSION_DENIED", "Out of branch scope.", status=403)
+            except AdminBranch.DoesNotExist:
+                return error_response("PERMISSION_DENIED", "No branch assigned.", status=403)
 
-        if booking.status != Booking.Status.PENDING:
+        if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
             return error_response(
                 "VALIDATION_ERROR",
-                "Only pending bookings can accept cash payment.",
+                "Only pending or confirmed bookings can accept cash payment.",
                 status=400,
             )
         if booking.payment_status != Booking.PaymentStatus.UNPAID:
             return error_response(
                 "VALIDATION_ERROR",
-                "Booking is already paid or refunded.",
+                "Booking is already paid or has a pending refund.",
                 status=400,
             )
 
@@ -434,6 +496,7 @@ class BookingCashPaymentView(APIView):
                 booking,
                 changed_by=user,
                 notes=body.validated_data.get("notes", ""),
+                payment_reference=body.validated_data.get("payment_reference", ""),
             )
         except ValueError as exc:
             return error_response("VALIDATION_ERROR", str(exc), status=400)
@@ -465,23 +528,19 @@ class BookingStatusLogView(generics.ListAPIView):
         return paginated_response(self.get_queryset(), request, BookingStatusLogSerializer)
 
 
-@csrf_exempt
-@require_POST
-def razorpay_webhook(request):
-    """
-    Accept Razorpay webhooks and process them asynchronously.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    Returns 200 immediately so Razorpay does not retry while work runs in Celery.
-    """
-    from bookings.tasks import razorpay_verify_payment_webhook
-
-    signature = request.headers.get("X-Razorpay-Signature", "")
-    raw_body = request.body.decode("utf-8")
-
-    try:
-        payload = json.loads(raw_body) if raw_body else None
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "invalid_json"}, status=400)
-
-    razorpay_verify_payment_webhook.delay(raw_body, signature, payload)
-    return HttpResponse(status=200)
+def _revert_booking_coupons(booking: Booking) -> None:
+    """Revert all coupons on a booking back to DISPATCHED status."""
+    coupon_ids = list(booking.coupons_applied.values_list("pk", flat=True))
+    if coupon_ids:
+        Coupon.objects.filter(pk__in=coupon_ids).update(
+            status=Coupon.Status.DISPATCHED,
+            redeemed_by=None,
+            redeemed_at_booking=None,
+            redeemed_at_branch=None,
+            redeemed_on=None,
+        )
+        booking.coupons_applied.clear()

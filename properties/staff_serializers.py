@@ -158,6 +158,36 @@ class StaffRoomCreateSerializer(serializers.Serializer):
         )
 
 
+class StaffRoomOperationalStatusSerializer(serializers.Serializer):
+    """Change only ``operational_status`` (available / blocked / maintenance)."""
+
+    operational_status = serializers.ChoiceField(
+        choices=("available", "blocked", "maintenance"),
+    )
+
+    def validate_operational_status(self, value: str) -> str:
+        room = self.context["room"]
+        if value in ("blocked", "maintenance"):
+            from bookings.models import Booking
+
+            if Booking.objects.filter(
+                room=room,
+                status=Booking.Status.CHECKED_IN,
+                is_deleted=False,
+            ).exists():
+                raise serializers.ValidationError(
+                    "Cannot block or mark maintenance while a guest is checked in. "
+                    "Check the guest out first."
+                )
+        return value
+
+    def save(self) -> Room:
+        room: Room = self.context["room"]
+        room.operational_status = self.validated_data["operational_status"]
+        room.save(update_fields=["operational_status", "updated_at"])
+        return room
+
+
 class StaffRoomUpdateSerializer(serializers.Serializer):
     room_type_id = serializers.UUIDField(required=False)
     room_number = serializers.CharField(max_length=50, required=False)
@@ -173,6 +203,24 @@ class StaffRoomUpdateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         room = self.context["room"]
+        if "operational_status" in attrs:
+            new_status = attrs["operational_status"]
+            if new_status in ("blocked", "maintenance"):
+                from bookings.models import Booking
+
+                if Booking.objects.filter(
+                    room=room,
+                    status=Booking.Status.CHECKED_IN,
+                    is_deleted=False,
+                ).exists():
+                    raise serializers.ValidationError(
+                        {
+                            "operational_status": (
+                                "Cannot block or mark maintenance while a guest is "
+                                "checked in. Check the guest out first."
+                            )
+                        }
+                    )
         if "room_number" in attrs:
             number = attrs["room_number"].strip()
             if (

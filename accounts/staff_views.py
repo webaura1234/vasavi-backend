@@ -55,6 +55,10 @@ STAFF_REFRESH_COOKIE = "vasavi_staff_refresh"
 STAFF_COOKIE_PATH = "/api/v1/staff/"
 
 
+def _access_expires_in_seconds() -> int:
+  return int(settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"].total_seconds())
+
+
 def _generate_otp_code() -> str:
     return "".join(random.choices(string.digits, k=6))
 
@@ -230,6 +234,7 @@ class StaffOTPVerifyView(APIView):
         response = success_response(
             {
                 "access": access,
+                "access_expires_in": _access_expires_in_seconds(),
                 "user": StaffMeSerializer(user, context={"request": request}).data,
                 "state": "dashboard",
             }
@@ -265,7 +270,12 @@ class StaffTokenRefreshView(APIView):
             new_refresh = RefreshToken.for_user(user)
             access = str(new_refresh.access_token)
 
-            response = success_response({"access": access})
+            response = success_response(
+                {
+                    "access": access,
+                    "access_expires_in": _access_expires_in_seconds(),
+                }
+            )
             _set_staff_refresh_cookie(response, str(new_refresh))
             return response
         except (TokenError, User.DoesNotExist, KeyError):
@@ -279,17 +289,24 @@ class StaffTokenRefreshView(APIView):
 
 
 class StaffLogoutView(APIView):
-    permission_classes = [IsAuthenticated]
+    """Sign out using Bearer token and/or httpOnly refresh cookie."""
+
+    permission_classes = [IsPublic]
 
     def post(self, request):
-        if request.user.role not in ("admin", "super_admin"):
+        raw = request.COOKIES.get(STAFF_REFRESH_COOKIE)
+
+        if (
+            getattr(request, "user", None)
+            and request.user.is_authenticated
+            and request.user.role not in ("admin", "super_admin")
+        ):
             return error_response(
                 "ACCESS_DENIED",
                 "This portal is for staff only.",
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        raw = request.COOKIES.get(STAFF_REFRESH_COOKIE)
         if raw:
             try:
                 refresh = RefreshToken(raw)

@@ -35,6 +35,11 @@ def send_booking_confirmation(booking_id: int) -> dict[str, str | bool]:
 
     email, phone = _recipient_for_booking(booking)
     subject = f"Booking confirmed — {booking.booking_reference}"
+    amount_line = (
+        f"Amount paid: ₹{booking.final_amount / 100:,.2f}"
+        if booking.payment_status == Booking.PaymentStatus.PAID
+        else f"Amount due at property: ₹{booking.final_amount / 100:,.2f}"
+    )
     message = (
         f"Dear {booking.guest_name or booking.user.name or 'Guest'},\n\n"
         f"Your stay at {booking.branch.name} is confirmed.\n"
@@ -42,7 +47,7 @@ def send_booking_confirmation(booking_id: int) -> dict[str, str | bool]:
         f"Check-in: {booking.check_in_date}\n"
         f"Check-out: {booking.check_out_date}\n"
         f"Room: {booking.room.room_number}\n"
-        f"Amount paid: ₹{booking.final_amount / 100:,.2f}\n\n"
+        f"{amount_line}\n\n"
         f"Thank you,\nVasavi Clubs International"
     )
 

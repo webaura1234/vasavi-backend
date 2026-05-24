@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from accounts.models import AdminBranch
 from bookings.models import Booking
 from permissions import IsAdminOrAbove
 from properties.models import Room, RoomImage
@@ -101,11 +102,36 @@ class StaffRoomDetailView(APIView):
             return error_response("NOT_FOUND", "Room not found.", status=404)
         serializer = StaffRoomUpdateSerializer(
             data=request.data,
-            context={"room": room},
+            context={"room": room, "request": request},
             partial=True,
         )
         serializer.is_valid(raise_exception=True)
         room = serializer.update(room, serializer.validated_data)
+        room = _room_queryset_for_staff(request.user).get(pk=room.pk)
+        return success_response(
+            StaffRoomSerializer(room, context={"request": request}).data
+        )
+
+
+class StaffRoomOperationalStatusView(APIView):
+    """Set staff operational status: available, blocked, or maintenance."""
+
+    permission_classes = [IsAdminOrAbove]
+    parser_classes = [JSONParser]
+
+    def patch(self, request, pk):
+        room = _get_room_for_staff(request.user, pk)
+        if not room:
+            return error_response("NOT_FOUND", "Room not found.", status=404)
+
+        from properties.staff_serializers import StaffRoomOperationalStatusSerializer
+
+        serializer = StaffRoomOperationalStatusSerializer(
+            data=request.data,
+            context={"room": room},
+        )
+        serializer.is_valid(raise_exception=True)
+        room = serializer.save()
         room = _room_queryset_for_staff(request.user).get(pk=room.pk)
         return success_response(
             StaffRoomSerializer(room, context={"request": request}).data

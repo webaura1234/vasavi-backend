@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import date
 
 from django.db import transaction
@@ -11,19 +10,13 @@ from rest_framework import serializers
 
 from accounts.serializers import UserProfileSerializer
 from bookings.models import Booking, BookingStatusLog
+from bookings.services.pricing import compute_coupon_discount
 from branches.serializers import BranchSerializer
 from coupons.models import Coupon
 from coupons.serializers import CouponSerializer
 from properties.models import Room
 from properties.serializers import RoomSerializer
 from utils.money import paise_to_rupees_display
-
-
-def _parse_concession_percent(extra_benefit: str) -> int:
-    match = re.search(r"(\d+)\s*%", extra_benefit or "")
-    if match:
-        return min(100, max(0, int(match.group(1))))
-    return 50
 
 
 class BookingSerializer(serializers.ModelSerializer):
@@ -38,6 +31,8 @@ class BookingSerializer(serializers.ModelSerializer):
     discount_amount_paise = serializers.IntegerField(source="discount_amount", read_only=True)
     final_amount_paise = serializers.IntegerField(source="final_amount", read_only=True)
     coupons_applied = CouponSerializer(many=True, read_only=True)
+    is_cancellable_by_guest = serializers.BooleanField(read_only=True)
+    needs_refund_approval = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Booking
@@ -68,6 +63,16 @@ class BookingSerializer(serializers.ModelSerializer):
             "notes",
             "cancelled_at",
             "cancellation_reason",
+            "cancel_initiated_by_role",
+            "refund_amount",
+            "refund_reference",
+            "refund_processed_at",
+            "refund_reason",
+            "refund_requested_at",
+            "refund_requested_reason",
+            "expires_at",
+            "is_cancellable_by_guest",
+            "needs_refund_approval",
             "created_at",
             "updated_at",
         )
@@ -100,6 +105,8 @@ class BookingCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         check_in = attrs["check_in_date"]
         check_out = attrs["check_out_date"]
+
+        # --- Date validations -----------------------------------------------
         if check_out <= check_in:
             raise serializers.ValidationError(
                 {"check_out_date": "Check-out must be after check-in."}
@@ -115,6 +122,7 @@ class BookingCreateSerializer(serializers.Serializer):
             )
         attrs["nights"] = nights
 
+        # --- Room validations -----------------------------------------------
         try:
             room = Room.objects.select_related("branch").get(
                 pk=attrs["room_id"],
@@ -123,17 +131,38 @@ class BookingCreateSerializer(serializers.Serializer):
             )
         except Room.DoesNotExist as exc:
             raise serializers.ValidationError({"room_id": "Room not found."}) from exc
+
+        # Operational status check
+        if room.operational_status != "available":
+            raise serializers.ValidationError(
+                {"room_id": f"This room is currently {room.operational_status} and cannot be booked."}
+            )
+
+        # Donor-exclusive rooms
+        request = self.context["request"]
+        if room.is_donor_exclusive and request.user.role not in ("donor", "admin", "super_admin"):
+            raise serializers.ValidationError(
+                {"room_id": "This room is reserved for donors only."}
+            )
+
+        # Guest count vs capacity
+        guest_count = attrs.get("guest_count", 1)
+        if guest_count > room.capacity:
+            raise serializers.ValidationError(
+                {"guest_count": f"This room accommodates a maximum of {room.capacity} guest(s)."}
+            )
+
         attrs["room"] = room
         attrs["check_in"] = check_in
         attrs["check_out"] = check_out
 
+        # --- Coupon validations ---------------------------------------------
         coupon_ids = attrs.get("coupon_ids") or []
         if len(coupon_ids) > 2:
             raise serializers.ValidationError(
                 {"coupon_ids": "Maximum two coupons allowed per booking."}
             )
 
-        request = self.context["request"]
         coupons = []
         types_seen = set()
         for coupon_id in coupon_ids:
@@ -163,8 +192,11 @@ class BookingCreateSerializer(serializers.Serializer):
         attrs["coupons"] = coupons
         return attrs
 
-    def _room_has_overlap(self, room: Room, check_in: date, check_out: date) -> bool:
-        return Booking.objects.filter(
+    def _room_is_available(self, room: Room, check_in: date, check_out: date) -> bool:
+        """Check both operational status and booking overlap."""
+        if room.operational_status != "available":
+            return False
+        return not Booking.objects.filter(
             room=room,
             status__in=[
                 Booking.Status.PENDING,
@@ -185,31 +217,16 @@ class BookingCreateSerializer(serializers.Serializer):
         coupons = validated_data.get("coupons", [])
 
         base_amount = room.base_price_per_night * nights
-        discount_amount = 0
-        final_amount = base_amount
-
-        has_free = any(c.coupon_type == Coupon.CouponType.FREE for c in coupons)
-        concession = next(
-            (c for c in coupons if c.coupon_type == Coupon.CouponType.CONCESSION),
-            None,
-        )
-
-        if has_free:
-            discount_amount = base_amount
-            final_amount = 0
-        elif concession:
-            percent = _parse_concession_percent(concession.batch.extra_benefit)
-            discount_amount = (base_amount * percent) // 100
-            final_amount = base_amount - discount_amount
+        discount_amount, final_amount = compute_coupon_discount(base_amount, coupons)
 
         with transaction.atomic():
-            # Lock room row to prevent concurrent double bookings for same dates.
+            # Lock room row to prevent concurrent double-bookings.
             room = Room.objects.select_for_update().get(
                 pk=room.pk,
                 is_deleted=False,
                 is_active=True,
             )
-            if self._room_has_overlap(room, check_in, check_out):
+            if not self._room_is_available(room, check_in, check_out):
                 raise serializers.ValidationError(
                     {"room_id": "Room is not available for the selected dates."}
                 )
@@ -222,6 +239,7 @@ class BookingCreateSerializer(serializers.Serializer):
                 user.phone or ""
             )
 
+            # Hold the room while the guest completes blessings / payment steps.
             booking = Booking.objects.create(
                 user=user,
                 room=room,
@@ -240,39 +258,100 @@ class BookingCreateSerializer(serializers.Serializer):
             )
 
             if coupons:
-                now = timezone.now()
-                locked_coupons = []
-                for coupon in coupons:
-                    locked = Coupon.objects.select_for_update().get(pk=coupon.pk)
-                    if locked.status != Coupon.Status.DISPATCHED:
-                        raise serializers.ValidationError(
-                            {
-                                "coupon_ids": (
-                                    f"Coupon {locked.serial_number} is no longer available."
-                                )
-                            }
-                        )
-                    locked_coupons.append(locked)
+                from bookings.services.guest_confirm import redeem_coupons_on_booking
 
-                booking.coupons_applied.set(locked_coupons)
-                booking.validate_coupons()
-                for locked in locked_coupons:
-                    locked.status = Coupon.Status.REDEEMED
-                    locked.redeemed_by = request.user
-                    locked.redeemed_at_booking = booking
-                    locked.redeemed_at_branch = booking.branch
-                    locked.redeemed_on = now
-                    locked.save()
+                try:
+                    redeem_coupons_on_booking(
+                        booking, coupons, changed_by=request.user
+                    )
+                except ValueError as exc:
+                    raise serializers.ValidationError(
+                        {"coupon_ids": str(exc)}
+                    ) from exc
 
             BookingStatusLog.objects.create(
                 booking=booking,
                 from_status=Booking.Status.PENDING,
                 to_status=Booking.Status.PENDING,
                 changed_by=request.user,
-                reason="Booking created",
+                reason="Pending reservation created (guest checkout in progress)",
             )
 
         return booking
+
+
+class BookingGuestConfirmSerializer(serializers.Serializer):
+    """Finalize a pending guest booking (apply coupons, confirm, pay at desk)."""
+
+    coupon_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        allow_empty=True,
+    )
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        booking: Booking = self.context["booking"]
+
+        if booking.user_id != request.user.pk:
+            raise serializers.ValidationError("Not your booking.")
+        if booking.status != Booking.Status.PENDING:
+            raise serializers.ValidationError(
+                "Only pending bookings can be confirmed."
+            )
+        if booking.payment_status != Booking.PaymentStatus.UNPAID:
+            raise serializers.ValidationError("Booking is not awaiting payment.")
+
+        coupon_ids = attrs.get("coupon_ids") or []
+        if len(coupon_ids) > 2:
+            raise serializers.ValidationError(
+                {"coupon_ids": "Maximum two coupons allowed per booking."}
+            )
+
+        coupons = []
+        types_seen = set()
+        for coupon_id in coupon_ids:
+            try:
+                coupon = Coupon.objects.select_related("batch").get(pk=coupon_id)
+            except Coupon.DoesNotExist as exc:
+                raise serializers.ValidationError(
+                    {"coupon_ids": f"Coupon {coupon_id} not found."}
+                ) from exc
+            if coupon.status != Coupon.Status.DISPATCHED:
+                raise serializers.ValidationError(
+                    {"coupon_ids": f"Coupon {coupon.serial_number} is not dispatched."}
+                )
+            if coupon.assigned_donors.exists() and not coupon.assigned_donors.filter(
+                pk=request.user.pk
+            ).exists():
+                raise serializers.ValidationError(
+                    {"coupon_ids": f"Coupon {coupon.serial_number} is not assigned to you."}
+                )
+            if coupon.coupon_type in types_seen:
+                raise serializers.ValidationError(
+                    {"coupon_ids": "Cannot apply two coupons of the same type."}
+                )
+            types_seen.add(coupon.coupon_type)
+            coupons.append(coupon)
+
+        attrs["coupons"] = coupons
+        return attrs
+
+    def save(self):
+        booking: Booking = self.context["booking"]
+        request = self.context["request"]
+        from bookings.services.guest_confirm import confirm_guest_reservation
+
+        try:
+            return confirm_guest_reservation(
+                booking,
+                coupons=self.validated_data.get("coupons", []),
+                changed_by=request.user,
+                notes=self.validated_data.get("notes", ""),
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
 
 
 class BookingStatusUpdateSerializer(serializers.Serializer):
@@ -299,6 +378,7 @@ class BookingStatusUpdateSerializer(serializers.Serializer):
         booking = self.context["booking"]
         new_status = attrs["status"]
         allowed = self._ALLOWED.get(booking.status, set())
+
         if new_status not in allowed:
             raise serializers.ValidationError(
                 {
@@ -307,10 +387,36 @@ class BookingStatusUpdateSerializer(serializers.Serializer):
                     )
                 }
             )
-        if new_status == Booking.Status.CANCELLED and not attrs.get("reason"):
+
+        if new_status in (Booking.Status.CANCELLED, Booking.Status.NO_SHOW) and not attrs.get("reason"):
             raise serializers.ValidationError(
-                {"reason": "Cancellation reason is required."}
+                {"reason": "A reason is required when cancelling or marking no-show."}
             )
+
+        # --- Check-in guards ------------------------------------------------
+        if new_status == Booking.Status.CHECKED_IN:
+            # Must be paid before check-in
+            if booking.payment_status != Booking.PaymentStatus.PAID:
+                raise serializers.ValidationError(
+                    {
+                        "status": (
+                            "Cannot check in: cash payment has not been recorded for this booking. "
+                            "Record payment first."
+                        )
+                    }
+                )
+            # Cannot check in before the check-in date
+            today = timezone.localdate()
+            if today < booking.check_in_date:
+                raise serializers.ValidationError(
+                    {
+                        "status": (
+                            f"Cannot check in before the scheduled date "
+                            f"({booking.check_in_date})."
+                        )
+                    }
+                )
+
         return attrs
 
 
@@ -336,6 +442,12 @@ class PaymentOrderSerializer(serializers.Serializer):
 
 class CashPaymentSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    payment_reference = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=200,
+        help_text="Optional cash receipt number.",
+    )
 
 
 class BookingExtendStaySerializer(serializers.Serializer):
@@ -345,6 +457,7 @@ class BookingExtendStaySerializer(serializers.Serializer):
     def validate(self, attrs):
         booking = self.context["booking"]
         new_out = attrs["check_out_date"]
+
         if new_out <= booking.check_out_date:
             raise serializers.ValidationError(
                 {"check_out_date": "New checkout must be after the current checkout."}
@@ -358,5 +471,39 @@ class BookingExtendStaySerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"check_out_date": "Maximum stay is 30 nights."}
             )
+
+        # --- Overlap check: ensure no booking conflicts with the extension ---
+        overlap_exists = Booking.objects.filter(
+            room=booking.room,
+            status__in=[
+                Booking.Status.PENDING,
+                Booking.Status.CONFIRMED,
+                Booking.Status.CHECKED_IN,
+            ],
+            check_in_date__lt=new_out,
+            check_out_date__gt=booking.check_out_date,
+            is_deleted=False,
+        ).exclude(pk=booking.pk).exists()
+
+        if overlap_exists:
+            raise serializers.ValidationError(
+                {
+                    "check_out_date": (
+                        "Cannot extend: another booking overlaps with the new checkout date. "
+                        "Please choose an earlier date."
+                    )
+                }
+            )
+
         attrs["nights"] = nights
         return attrs
+
+
+class BookingRefundRequestSerializer(serializers.Serializer):
+    """Guest-submitted refund request for a cancelled paid booking."""
+
+    reason = serializers.CharField(
+        min_length=10,
+        max_length=1000,
+        help_text="Reason for requesting a refund (min 10 characters).",
+    )
