@@ -10,7 +10,8 @@ from django.utils import timezone
 from rest_framework import generics
 from rest_framework.views import APIView
 
-from accounts.models import AdminBranch
+from accounts.branch_scope import require_staff_branch_id, staff_branch_id
+from bookings.messages import cancel_not_allowed_message
 from bookings.models import Booking, BookingStatusLog
 from bookings.serializers import (
     BookingCreateSerializer,
@@ -40,13 +41,17 @@ def _booking_queryset_for_user(user):
     if user.role in ("user", "donor"):
         return qs.filter(user=user)
     if user.role == "admin":
-        try:
-            branch = user.admin_branch.branch
-        except AdminBranch.DoesNotExist:
+        branch_id = require_staff_branch_id(user)
+        if not branch_id:
             return qs.none()
-        return qs.filter(branch=branch)
+        return qs.filter(branch_id=branch_id)
     # super_admin: all branches (optional branch_id filter in list view only)
     return qs
+
+
+def _get_booking_for_user(user, pk):
+    """Load a booking the caller is allowed to access, or raise DoesNotExist."""
+    return _booking_queryset_for_user(user).get(pk=pk, is_deleted=False)
 
 
 class BookingListCreateView(generics.ListCreateAPIView):
@@ -66,6 +71,7 @@ class BookingListCreateView(generics.ListCreateAPIView):
         payment_status = self.request.query_params.get("payment_status")
         check_in = self.request.query_params.get("check_in_date")
         branch_id = self.request.query_params.get("branch_id")
+        booking_reference = self.request.query_params.get("booking_reference")
 
         if status_param:
             qs = qs.filter(status=status_param)
@@ -73,6 +79,9 @@ class BookingListCreateView(generics.ListCreateAPIView):
             qs = qs.filter(payment_status=payment_status)
         if check_in:
             qs = qs.filter(check_in_date=check_in)
+        if booking_reference:
+            qs = qs.filter(booking_reference__iexact=booking_reference.strip())
+        # Branch admins are always scoped via AdminBranch; never trust query params.
         if branch_id and self.request.user.role == "super_admin":
             qs = qs.filter(branch_id=branch_id)
         return qs.order_by("-created_at")
@@ -105,16 +114,9 @@ class BookingStatusUpdateView(APIView):
 
     def patch(self, request, pk):
         try:
-            booking = Booking.objects.select_related("branch").get(pk=pk, is_deleted=False)
+            booking = _get_booking_for_user(request.user, pk)
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
-
-        if request.user.role == "admin":
-            try:
-                if booking.branch_id != request.user.admin_branch.branch_id:
-                    return error_response("PERMISSION_DENIED", "Out of branch scope.", status=403)
-            except AdminBranch.DoesNotExist:
-                return error_response("PERMISSION_DENIED", "No branch assigned.", status=403)
 
         serializer = BookingStatusUpdateSerializer(
             data=request.data,
@@ -162,18 +164,9 @@ class BookingExtendStayView(APIView):
 
     def patch(self, request, pk):
         try:
-            booking = Booking.objects.select_related("room", "branch").get(
-                pk=pk, is_deleted=False
-            )
+            booking = _get_booking_for_user(request.user, pk)
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
-
-        if request.user.role == "admin":
-            try:
-                if booking.branch_id != request.user.admin_branch.branch_id:
-                    return error_response("PERMISSION_DENIED", "Out of branch scope.", status=403)
-            except AdminBranch.DoesNotExist:
-                return error_response("PERMISSION_DENIED", "No branch assigned.", status=403)
 
         if booking.status not in (
             Booking.Status.CONFIRMED,
@@ -245,30 +238,17 @@ class BookingCancelView(APIView):
     permission_classes = [PermIsAuthenticated]
 
     def post(self, request, pk):
+        user = request.user
         try:
-            booking = Booking.objects.select_related("branch").get(pk=pk, is_deleted=False)
+            booking = _get_booking_for_user(user, pk)
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
-
-        user = request.user
-
-        # Ownership check for regular users
-        if user.role in ("user", "donor") and booking.user_id != user.pk:
-            return error_response("PERMISSION_DENIED", "Not your booking.", status=403)
-
-        # Branch scope for admins
-        if user.role == "admin":
-            try:
-                if booking.branch_id != user.admin_branch.branch_id:
-                    return error_response("PERMISSION_DENIED", "Out of branch scope.", status=403)
-            except AdminBranch.DoesNotExist:
-                return error_response("PERMISSION_DENIED", "No branch assigned.", status=403)
 
         # Only cancellable if PENDING or CONFIRMED
         if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
             return error_response(
                 "VALIDATION_ERROR",
-                "Booking cannot be cancelled in its current status.",
+                cancel_not_allowed_message(booking.status),
                 status=400,
             )
 
@@ -343,12 +323,13 @@ class BookingRefundRequestView(APIView):
     permission_classes = [PermIsAuthenticated]
 
     def post(self, request, pk):
+        user = request.user
         try:
-            booking = Booking.objects.get(pk=pk, is_deleted=False)
+            booking = _get_booking_for_user(user, pk)
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
 
-        if booking.user_id != request.user.pk and request.user.role not in ("admin", "super_admin"):
+        if booking.user_id != user.pk and user.role not in ("admin", "super_admin"):
             return error_response("PERMISSION_DENIED", "Not your booking.", status=403)
 
         if booking.status != Booking.Status.CANCELLED:
@@ -463,17 +444,9 @@ class BookingCashPaymentView(APIView):
             )
 
         try:
-            booking = Booking.objects.select_related("branch").get(pk=pk, is_deleted=False)
+            booking = _get_booking_for_user(user, pk)
         except Booking.DoesNotExist:
             return error_response("NOT_FOUND", "Booking not found.", status=404)
-
-        # Branch scope for admins
-        if user.role == "admin":
-            try:
-                if booking.branch_id != user.admin_branch.branch_id:
-                    return error_response("PERMISSION_DENIED", "Out of branch scope.", status=403)
-            except AdminBranch.DoesNotExist:
-                return error_response("PERMISSION_DENIED", "No branch assigned.", status=403)
 
         if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
             return error_response(
@@ -516,10 +489,9 @@ class BookingStatusLogView(generics.ListAPIView):
         qs = BookingStatusLog.objects.filter(booking_id=booking_id).select_related(
             "changed_by"
         )
+        branch_id = staff_branch_id(user)
         if user.role == "admin":
-            try:
-                branch_id = user.admin_branch.branch_id
-            except AdminBranch.DoesNotExist:
+            if not branch_id:
                 return BookingStatusLog.objects.none()
             qs = qs.filter(booking__branch_id=branch_id)
         return qs.order_by("-created_at")

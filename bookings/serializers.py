@@ -9,6 +9,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.serializers import UserProfileSerializer
+from bookings.messages import status_transition_not_allowed
 from bookings.models import Booking, BookingStatusLog
 from bookings.services.pricing import compute_coupon_discount
 from branches.serializers import BranchSerializer
@@ -368,10 +369,13 @@ class BookingStatusUpdateSerializer(serializers.Serializer):
             Booking.Status.CANCELLED,
             Booking.Status.NO_SHOW,
         },
-        Booking.Status.CHECKED_IN: {Booking.Status.CHECKED_OUT},
+        Booking.Status.CHECKED_IN: {
+            Booking.Status.CHECKED_OUT,
+            Booking.Status.CONFIRMED,
+        },
         Booking.Status.CHECKED_OUT: set(),
         Booking.Status.CANCELLED: set(),
-        Booking.Status.NO_SHOW: set(),
+        Booking.Status.NO_SHOW: {Booking.Status.CONFIRMED},
     }
 
     def validate(self, attrs):
@@ -382,15 +386,30 @@ class BookingStatusUpdateSerializer(serializers.Serializer):
         if new_status not in allowed:
             raise serializers.ValidationError(
                 {
-                    "status": (
-                        f"Cannot transition from {booking.status} to {new_status}."
+                    "status": status_transition_not_allowed(
+                        booking.status, new_status
                     )
                 }
             )
 
-        if new_status in (Booking.Status.CANCELLED, Booking.Status.NO_SHOW) and not attrs.get("reason"):
+        needs_reason = new_status in (
+            Booking.Status.CANCELLED,
+            Booking.Status.NO_SHOW,
+            Booking.Status.CONFIRMED,
+        ) and booking.status in (
+            Booking.Status.NO_SHOW,
+            Booking.Status.CHECKED_IN,
+        )
+        if new_status in (Booking.Status.CANCELLED, Booking.Status.NO_SHOW):
+            needs_reason = True
+        if needs_reason and not (attrs.get("reason") or "").strip():
             raise serializers.ValidationError(
-                {"reason": "A reason is required when cancelling or marking no-show."}
+                {
+                    "reason": (
+                        "Please add a short reason so your team can see why "
+                        "this change was made."
+                    )
+                }
             )
 
         # --- Check-in guards ------------------------------------------------

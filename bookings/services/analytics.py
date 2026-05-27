@@ -14,7 +14,7 @@ from django.db.models import Count, DateField, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
 
-from accounts.models import AdminBranch
+from accounts.branch_scope import staff_branch_id
 from bookings.models import Booking
 from bookings.views import _booking_queryset_for_user
 from properties.models import Room
@@ -29,11 +29,9 @@ _EXCLUDED_BOOKING_STATUSES = (
 
 
 def _resolve_branch_id(user, branch_id_param: str | None) -> str | None:
-    if user.role == "admin":
-        try:
-            return str(user.admin_branch.branch_id)
-        except AdminBranch.DoesNotExist:
-            return None
+    assigned = staff_branch_id(user)
+    if assigned:
+        return assigned
     if user.role == "super_admin" and branch_id_param:
         return branch_id_param
     return None

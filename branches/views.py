@@ -5,6 +5,7 @@ from __future__ import annotations
 from django.utils import timezone
 from rest_framework import generics
 
+from accounts.branch_scope import staff_branch_id
 from accounts.models import AdminBranch
 from branches.models import Branch
 from branches.serializers import (
@@ -33,6 +34,11 @@ class BranchListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         qs = Branch.objects.filter(is_deleted=False)
         user = self.request.user
+        if user.is_authenticated and user.role == "admin":
+            branch_id = staff_branch_id(user)
+            if not branch_id:
+                return qs.none()
+            return qs.filter(pk=branch_id).order_by("city", "name")
         if user.is_authenticated and user.role == "super_admin":
             return qs.order_by("city", "name")
         return qs.filter(is_active=True).order_by("city", "name")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from accounts.models import AdminBranch
+from accounts.branch_scope import filter_staff_room_queryset, staff_branch_id
 from bookings.models import Booking
 from permissions import IsAdminOrAbove
 from properties.models import Room, RoomImage
@@ -22,25 +22,13 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
-def _staff_branch_id(user):
-    if user.role != "admin":
-        return None
-    try:
-        return user.admin_branch.branch_id
-    except AdminBranch.DoesNotExist:
-        return None
-
-
-def _room_queryset_for_staff(user):
+def _room_queryset_for_staff(user, branch_id_param: str | None = None):
     qs = (
         Room.objects.filter(is_deleted=False)
         .select_related("branch", "room_type")
         .prefetch_related("images")
     )
-    scoped = _staff_branch_id(user)
-    if scoped:
-        return qs.filter(branch_id=scoped)
-    return qs
+    return filter_staff_room_queryset(qs, user, branch_id_param)
 
 
 def _get_room_for_staff(user, pk):
@@ -58,10 +46,8 @@ class StaffRoomListCreateView(APIView):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get(self, request):
-        qs = _room_queryset_for_staff(request.user)
         branch_id = request.query_params.get("branch_id")
-        if branch_id and request.user.role == "super_admin":
-            qs = qs.filter(branch_id=branch_id)
+        qs = _room_queryset_for_staff(request.user, branch_id)
         return paginated_response(
             qs.order_by("room_number"),
             request,
@@ -219,7 +205,7 @@ class StaffRoomSearchView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        scoped_branch = _staff_branch_id(request.user)
+        scoped_branch = staff_branch_id(request.user)
         if scoped_branch:
             if data.get("branch_id") and str(data["branch_id"]) != str(scoped_branch):
                 return error_response(
