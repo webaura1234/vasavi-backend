@@ -23,6 +23,7 @@ from bookings.serializers import (
     BookingStatusUpdateSerializer,
     CashPaymentSerializer,
 )
+from bookings.query_filters import apply_booking_list_filters, compute_booking_list_summary
 from bookings.services.payments import confirm_booking_payment, confirm_cash_payment
 from coupons.models import Coupon
 from permissions import IsAdminOrAbove
@@ -67,27 +68,34 @@ class BookingListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         qs = _booking_queryset_for_user(self.request.user)
-        status_param = self.request.query_params.get("status")
-        payment_status = self.request.query_params.get("payment_status")
-        check_in = self.request.query_params.get("check_in_date")
         branch_id = self.request.query_params.get("branch_id")
-        booking_reference = self.request.query_params.get("booking_reference")
-
-        if status_param:
-            qs = qs.filter(status=status_param)
-        if payment_status:
-            qs = qs.filter(payment_status=payment_status)
-        if check_in:
-            qs = qs.filter(check_in_date=check_in)
-        if booking_reference:
-            qs = qs.filter(booking_reference__iexact=booking_reference.strip())
         # Branch admins are always scoped via AdminBranch; never trust query params.
         if branch_id and self.request.user.role == "super_admin":
             qs = qs.filter(branch_id=branch_id)
+        qs = apply_booking_list_filters(qs, self.request.query_params)
         return qs.order_by("-created_at")
 
     def list(self, request, *args, **kwargs):
-        return paginated_response(self.get_queryset(), request, BookingSerializer)
+        qs = self.get_queryset()
+        if request.query_params.get("include_summary", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            from rest_framework.pagination import PageNumberPagination
+
+            paginator = PageNumberPagination()
+            page = paginator.paginate_queryset(qs, request)
+            serializer = BookingSerializer(page, many=True, context={"request": request})
+            payload = {
+                "count": paginator.page.paginator.count,
+                "next": paginator.get_next_link(),
+                "previous": paginator.get_previous_link(),
+                "results": serializer.data,
+                "summary": compute_booking_list_summary(qs),
+            }
+            return success_response(payload)
+        return paginated_response(qs, request, BookingSerializer)
 
     def create(self, request, *args, **kwargs):
         serializer = BookingCreateSerializer(data=request.data, context={"request": request})

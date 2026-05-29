@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from bookings.services.analytics import (
-    build_dashboard_analytics,
+    build_dashboard_collections_chart,
+    build_dashboard_stats,
     build_finance_analytics,
     build_reports_analytics,
 )
@@ -14,13 +15,28 @@ from utils.responses import error_response, success_response
 
 
 class StaffDashboardAnalyticsView(APIView):
-    """Operations dashboard summary and 7-day revenue chart."""
+    """Operations dashboard live stats (today, occupancy, rolling 7d totals)."""
 
     permission_classes = [IsAdminOrAbove]
 
     def get(self, request):
         branch_id = request.query_params.get("branch_id")
-        data = build_dashboard_analytics(request.user, branch_id)
+        data = build_dashboard_stats(request.user, branch_id)
+        return success_response(data)
+
+
+class StaffDashboardCollectionsChartView(APIView):
+    """Collections & donor savings chart for a selected period."""
+
+    permission_classes = [IsAdminOrAbove]
+
+    def get(self, request):
+        branch_id = request.query_params.get("branch_id")
+        data = build_dashboard_collections_chart(
+            request.user,
+            branch_id,
+            query_params=request.query_params,
+        )
         return success_response(data)
 
 
@@ -31,7 +47,11 @@ class StaffReportsAnalyticsView(APIView):
 
     def get(self, request):
         branch_id = request.query_params.get("branch_id")
-        data = build_reports_analytics(request.user, branch_id)
+        data = build_reports_analytics(
+            request.user,
+            branch_id,
+            query_params=request.query_params,
+        )
         return success_response(data)
 
 
@@ -42,7 +62,11 @@ class StaffFinanceAnalyticsView(APIView):
 
     def get(self, request):
         branch_id = request.query_params.get("branch_id")
-        data = build_finance_analytics(request.user, branch_id)
+        data = build_finance_analytics(
+            request.user,
+            branch_id,
+            query_params=request.query_params,
+        )
         return success_response(data)
 
 

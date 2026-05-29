@@ -1,6 +1,6 @@
 """Analytics revenue attribution tests."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from django.test import TestCase
 from django.utils import timezone
@@ -10,6 +10,7 @@ from bookings.models import Booking
 from bookings.services.analytics import (
     _build_revenue_chart,
     _collected_bookings_qs,
+    _day_point_label,
     build_dashboard_analytics,
 )
 from bookings.views import _booking_queryset_for_user
@@ -93,6 +94,12 @@ class AnalyticsRevenueTests(TestCase):
         collected = _collected_bookings_qs(qs)
         total = sum(b.final_amount for b in collected)
         self.assertEqual(total, paid.final_amount)
+
+    def test_chart_point_label_uses_calendar_date_not_weekday(self):
+        label = _day_point_label(date(2026, 5, 28))
+        self.assertEqual(label, "28 May 2026")
+        for weekday in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+            self.assertNotIn(weekday, label)
 
     def test_chart_does_not_double_count_same_booking(self):
         now = timezone.now()

@@ -16,6 +16,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import OTPLog, ProfileConfirmation, User
 from accounts.serializers import (
+    ProfileUpdateSerializer,
     OTPVerifySerializer,
     OTPSendSerializer,
     ProfileConfirmSerializer,
@@ -273,12 +274,12 @@ class ProfileConfirmView(generics.RetrieveUpdateAPIView):
         confirmation, _ = ProfileConfirmation.objects.get_or_create(user=user)
 
         if confirmation.is_confirmed:
-            return success_response(
-                {
-                    **UserProfileSerializer(user).data,
-                    "state": "dashboard",
-                }
-            )
+            body = ProfileUpdateSerializer(data=request.data, partial=True)
+            body.is_valid(raise_exception=True)
+            if "name" in body.validated_data:
+                user.name = body.validated_data["name"]
+                user.save(update_fields=["name", "updated_at"])
+            return success_response(UserProfileSerializer(user).data)
 
         body = ProfileConfirmSerializer(data=request.data, partial=True)
         body.is_valid(raise_exception=True)

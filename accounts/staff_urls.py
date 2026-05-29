@@ -12,14 +12,20 @@ from accounts.staff_views import (
 )
 from bookings.staff_analytics_views import (
     StaffDashboardAnalyticsView,
+    StaffDashboardCollectionsChartView,
     StaffDonorAnalyticsView,
     StaffFinanceAnalyticsView,
     StaffReportsAnalyticsView,
 )
 from bookings.staff_views import (
+    StaffBookingExportView,
     StaffBookingRefundView,
     StaffManualBookingCreateView,
     StaffRefundApprovalView,
+)
+from support.staff_views import (
+    StaffSupportTicketListCreateView,
+    StaffSupportTicketStatusView,
 )
 from properties.staff_views import (
     StaffRoomDetailView,
@@ -45,6 +51,11 @@ urlpatterns = [
         name="staff-analytics-dashboard",
     ),
     path(
+        "analytics/dashboard/collections/",
+        StaffDashboardCollectionsChartView.as_view(),
+        name="staff-analytics-dashboard-collections",
+    ),
+    path(
         "analytics/reports/",
         StaffReportsAnalyticsView.as_view(),
         name="staff-analytics-reports",
@@ -60,6 +71,7 @@ urlpatterns = [
         name="staff-analytics-donors",
     ),
     path("bookings/", StaffManualBookingCreateView.as_view(), name="staff-bookings-create"),
+    path("bookings/export/", StaffBookingExportView.as_view(), name="staff-bookings-export"),
     path(
         "bookings/<uuid:pk>/refund/",
         StaffBookingRefundView.as_view(),
@@ -74,6 +86,12 @@ urlpatterns = [
         "bookings/<uuid:pk>/refund-approval/",
         StaffRefundApprovalView.as_view(),
         name="staff-refund-approval",
+    ),
+    path("support/tickets/", StaffSupportTicketListCreateView.as_view(), name="staff-support-tickets"),
+    path(
+        "support/tickets/<uuid:pk>/status/",
+        StaffSupportTicketStatusView.as_view(),
+        name="staff-support-ticket-status",
     ),
     path("rooms/", StaffRoomListCreateView.as_view(), name="staff-rooms"),
     path("rooms/search/", StaffRoomSearchView.as_view(), name="staff-rooms-search"),

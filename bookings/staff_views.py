@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 
 from django.db import transaction
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import serializers as drf_serializers
 from rest_framework.views import APIView
 
 from bookings.models import Booking, BookingStatusLog
+from bookings.query_filters import apply_booking_list_filters, bookings_to_csv_rows
 from bookings.serializers import BookingSerializer
 from bookings.staff_serializers import StaffManualBookingCreateSerializer
 from bookings.views import _booking_queryset_for_user
@@ -202,3 +206,27 @@ class StaffRefundApprovalView(APIView):
 
         # Approve → delegate to StaffBookingRefundView logic
         return StaffBookingRefundView().post(request, pk)
+
+
+class StaffBookingExportView(APIView):
+    """Export filtered bookings as CSV (same query params as list)."""
+
+    permission_classes = [IsAdminOrAbove]
+
+    def get(self, request):
+        qs = _booking_queryset_for_user(request.user).select_related(
+            "room", "room__room_type", "branch", "user"
+        )
+        branch_id = request.query_params.get("branch_id")
+        if branch_id and request.user.role == "super_admin":
+            qs = qs.filter(branch_id=branch_id)
+        qs = apply_booking_list_filters(qs, request.query_params).order_by("-created_at")
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        for row in bookings_to_csv_rows(list(qs[:5000])):
+            writer.writerow(row)
+
+        response = HttpResponse(buffer.getvalue(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="bookings-export.csv"'
+        return response

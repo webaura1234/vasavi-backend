@@ -224,6 +224,16 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
                     changed_by=staff,
                     reason="Confirmed for desk check-in (pay at checkout)",
                 )
+            else:
+                booking.status = Booking.Status.CONFIRMED
+                booking.save(update_fields=["status", "updated_at"])
+                BookingStatusLog.objects.create(
+                    booking=booking,
+                    from_status=Booking.Status.PENDING,
+                    to_status=Booking.Status.CONFIRMED,
+                    changed_by=staff,
+                    reason="Manual booking confirmed by staff",
+                )
 
             if check_in_now and booking.status == Booking.Status.CONFIRMED:
                 old = booking.status

@@ -62,6 +62,12 @@ class ProfileConfirmSerializer(serializers.Serializer):
     name = serializers.CharField(min_length=2, max_length=200)
 
 
+class ProfileUpdateSerializer(serializers.Serializer):
+    """Update display name for users who already confirmed their profile."""
+
+    name = serializers.CharField(min_length=2, max_length=200)
+
+
 class RegistrationSerializer(serializers.Serializer):
     registration_token = serializers.CharField()
     name = serializers.CharField(min_length=2, max_length=200)
