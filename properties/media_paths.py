@@ -1,4 +1,4 @@
-"""Filesystem paths under ``MEDIA_ROOT`` for property photos.
+"""Object key paths for property photos (Supabase ``images`` bucket or local ``MEDIA_ROOT``).
 
 Uploaded files are stored locally via ``FileSystemStorage`` today. When
 Cloudflare R2 (or another CDN) is wired in, keep these logical prefixes and

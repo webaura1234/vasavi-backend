@@ -17,6 +17,10 @@ from core.models import (
     SoftDeleteModel,
     TimeStampedModel,
 )
+from properties.media_paths import (
+    function_hall_image_upload_to,
+    room_image_upload_to,
+)
 
 
 OPERATIONAL_STATUS_CHOICES = [
@@ -148,7 +152,7 @@ class RoomImage(TimeStampedModel):
         related_name="images",
     )
     image = models.ImageField(
-        upload_to="properties.media_paths.room_image_upload_to",
+        upload_to=room_image_upload_to,
         help_text="Room photo (JPEG, PNG, or WebP).",
     )
     caption = models.CharField(max_length=200, blank=True)
@@ -259,7 +263,7 @@ class FunctionHallImage(TimeStampedModel):
         related_name="images",
     )
     image = models.ImageField(
-        upload_to="properties.media_paths.function_hall_image_upload_to",
+        upload_to=function_hall_image_upload_to,
         help_text="Hall photo (JPEG, PNG, or WebP).",
     )
     caption = models.CharField(max_length=200, blank=True)

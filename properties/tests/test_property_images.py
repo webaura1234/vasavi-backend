@@ -73,7 +73,28 @@ class RoomImageApiTests(TestCase):
         room_row = next(r for r in results if r["id"] == str(self.room.pk))
         self.assertEqual(len(room_row["images"]), 3)
         urls = [img["url"] for img in room_row["images"]]
-        self.assertTrue(all(u and "/media/" in u for u in urls))
+        self.assertTrue(
+            all(
+                u
+                and (
+                    u.startswith("http://")
+                    or u.startswith("https://")
+                    or "/media/" in u
+                )
+                for u in urls
+            )
+        )
+
+    def test_staff_can_register_room_image_by_storage_path(self):
+        path = "rooms/test-register.jpg"
+        response = self.client.post(
+            f"/api/v1/staff/rooms/{self.room.pk}/images/",
+            {"storage_path": path, "is_primary": True},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        image = self.room.images.get()
+        self.assertEqual(image.image.name, path)
 
     def test_staff_can_delete_room_image(self):
         image = RoomImage.objects.create(

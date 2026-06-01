@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from django.conf import settings
+
 from accounts.branch_scope import filter_staff_room_queryset, staff_branch_id
 from bookings.models import Booking
 from permissions import IsAdminOrAbove
+from properties.image_storage import delete_property_image_file
+from properties.image_upload import validate_property_storage_path
 from properties.models import Room, RoomImage
 from properties.serializers import RoomAvailabilitySerializer, RoomSearchSerializer
 from properties.staff_serializers import (
@@ -143,36 +147,59 @@ class StaffRoomImageUploadView(APIView):
             )
 
         upload = request.FILES.get("image")
-        if not upload:
+        storage_path = (request.data.get("storage_path") or "").strip()
+
+        if not upload and not storage_path:
             return error_response(
                 "VALIDATION_ERROR",
-                "Image file is required.",
+                "Image file or storage_path is required.",
                 status=400,
             )
-        if upload.content_type not in ALLOWED_IMAGE_TYPES:
+
+        if storage_path and not validate_property_storage_path(
+            settings.MEDIA_ROOMS_DIR, storage_path
+        ):
             return error_response(
                 "VALIDATION_ERROR",
-                "Only JPEG, PNG, or WebP images are allowed.",
+                "Invalid image storage path.",
                 status=400,
             )
-        if upload.size > MAX_IMAGE_BYTES:
-            return error_response(
-                "VALIDATION_ERROR",
-                "Image must be 5 MB or smaller.",
-                status=400,
-            )
+
+        if upload:
+            if upload.content_type not in ALLOWED_IMAGE_TYPES:
+                return error_response(
+                    "VALIDATION_ERROR",
+                    "Only JPEG, PNG, or WebP images are allowed.",
+                    status=400,
+                )
+            if upload.size > MAX_IMAGE_BYTES:
+                return error_response(
+                    "VALIDATION_ERROR",
+                    "Image must be 5 MB or smaller.",
+                    status=400,
+                )
 
         is_primary = request.data.get("is_primary") in (True, "true", "1", 1)
         if is_primary:
             room.images.update(is_primary=False)
 
-        image = RoomImage.objects.create(
-            room=room,
-            image=upload,
-            caption=(request.data.get("caption") or "")[:200],
-            is_primary=is_primary or not room.images.exists(),
-            sort_order=room.images.count(),
-        )
+        if storage_path and not upload:
+            image = RoomImage(
+                room=room,
+                caption=(request.data.get("caption") or "")[:200],
+                is_primary=is_primary or not room.images.exists(),
+                sort_order=room.images.count(),
+            )
+            image.image.name = storage_path
+            image.save()
+        else:
+            image = RoomImage.objects.create(
+                room=room,
+                image=upload,
+                caption=(request.data.get("caption") or "")[:200],
+                is_primary=is_primary or not room.images.exists(),
+                sort_order=room.images.count(),
+            )
         return success_response(
             RoomImageSerializer(image, context={"request": request}).data,
             status=201,
@@ -190,8 +217,9 @@ class StaffRoomImageDeleteView(APIView):
             image = room.images.get(pk=image_id)
         except RoomImage.DoesNotExist:
             return error_response("NOT_FOUND", "Image not found.", status=404)
-        image.image.delete(save=False)
+        storage_name = image.image.name
         image.delete()
+        delete_property_image_file(storage_name)
         return success_response(message="Image removed.")
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from django.conf import settings
 from django.db.models import Count
 
 from accounts.branch_scope import filter_staff_function_hall_queryset, staff_branch_id
@@ -16,6 +17,8 @@ from properties.function_hall_staff_serializers import (
     StaffFunctionHallUpdateSerializer,
     resolve_branch_for_hall_staff,
 )
+from properties.image_storage import delete_property_image_file
+from properties.image_upload import validate_property_storage_path
 from properties.models import FunctionHall, FunctionHallImage
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.views import APIView
@@ -157,36 +160,59 @@ class StaffFunctionHallImageUploadView(APIView):
             )
 
         upload = request.FILES.get("image")
-        if not upload:
+        storage_path = (request.data.get("storage_path") or "").strip()
+
+        if not upload and not storage_path:
             return error_response(
                 "VALIDATION_ERROR",
-                "Image file is required.",
+                "Image file or storage_path is required.",
                 status=400,
             )
-        if upload.content_type not in ALLOWED_IMAGE_TYPES:
+
+        if storage_path and not validate_property_storage_path(
+            settings.MEDIA_FUNCTION_HALLS_DIR, storage_path
+        ):
             return error_response(
                 "VALIDATION_ERROR",
-                "Only JPEG, PNG, or WebP images are allowed.",
+                "Invalid image storage path.",
                 status=400,
             )
-        if upload.size > MAX_IMAGE_BYTES:
-            return error_response(
-                "VALIDATION_ERROR",
-                "Image must be 5 MB or smaller.",
-                status=400,
-            )
+
+        if upload:
+            if upload.content_type not in ALLOWED_IMAGE_TYPES:
+                return error_response(
+                    "VALIDATION_ERROR",
+                    "Only JPEG, PNG, or WebP images are allowed.",
+                    status=400,
+                )
+            if upload.size > MAX_IMAGE_BYTES:
+                return error_response(
+                    "VALIDATION_ERROR",
+                    "Image must be 5 MB or smaller.",
+                    status=400,
+                )
 
         is_primary = request.data.get("is_primary") in (True, "true", "1", 1)
         if is_primary:
             hall.images.update(is_primary=False)
 
-        image = FunctionHallImage.objects.create(
-            function_hall=hall,
-            image=upload,
-            caption=(request.data.get("caption") or "")[:200],
-            is_primary=is_primary or not hall.images.exists(),
-            sort_order=hall.images.count(),
-        )
+        if storage_path and not upload:
+            image = FunctionHallImage(
+                function_hall=hall,
+                caption=(request.data.get("caption") or "")[:200],
+                is_primary=is_primary or not hall.images.exists(),
+                sort_order=hall.images.count(),
+            )
+            image.image.name = storage_path
+            image.save()
+        else:
+            image = FunctionHallImage.objects.create(
+                function_hall=hall,
+                image=upload,
+                caption=(request.data.get("caption") or "")[:200],
+                is_primary=is_primary or not hall.images.exists(),
+                sort_order=hall.images.count(),
+            )
         return success_response(
             FunctionHallImageStaffSerializer(image, context={"request": request}).data,
             status=201,
@@ -204,8 +230,9 @@ class StaffFunctionHallImageDeleteView(APIView):
             image = hall.images.get(pk=image_pk)
         except FunctionHallImage.DoesNotExist:
             return error_response("NOT_FOUND", "Image not found.", status=404)
-        image.image.delete(save=False)
+        storage_name = image.image.name
         image.delete()
+        delete_property_image_file(storage_name)
         return success_response(message="Image removed.")
 
 

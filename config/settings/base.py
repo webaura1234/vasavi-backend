@@ -299,9 +299,23 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").exists() else []
 
+# Supabase Storage (property photos only — bucket must be public for guest URLs).
+SUPABASE_URL = env("SUPABASE_URL", default="")
+SUPABASE_SERVICE_ROLE_KEY = env("SUPABASE_SERVICE_ROLE_KEY", default="")
+SUPABASE_PUBLISHABLE_KEY = env("SUPABASE_PUBLISHABLE_KEY", default="")
+SUPABASE_STORAGE_BUCKET = env("SUPABASE_STORAGE_BUCKET", default="images")
+
+# Storage API (upload/delete) must use the service role — publishable key hits RLS.
+SUPABASE_STORAGE_KEY = SUPABASE_SERVICE_ROLE_KEY
+_use_supabase_images = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
 STORAGES = {
     "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "BACKEND": (
+            "core.storage.supabase.SupabaseStorage"
+            if _use_supabase_images
+            else "django.core.files.storage.FileSystemStorage"
+        ),
     },
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
@@ -310,7 +324,7 @@ STORAGES = {
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
-# Subdirectories under MEDIA_ROOT for local uploads (swap storage backend later).
+# Object key prefixes inside the Supabase ``images`` bucket (or MEDIA_ROOT subdirs locally).
 MEDIA_ROOMS_DIR = "rooms"
 MEDIA_FUNCTION_HALLS_DIR = "function_halls"
 
