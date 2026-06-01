@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Booking, BookingStatusLog
+from .models import Booking, BookingStatusLog, BookingExport
 
 
 class BookingStatusLogInline(admin.TabularInline):
@@ -36,3 +36,24 @@ class BookingStatusLogAdmin(admin.ModelAdmin):
     list_display = ("booking", "from_status", "to_status", "changed_by", "created_at")
     list_filter = ("to_status",)
     raw_id_fields = ("booking", "changed_by")
+
+
+@admin.register(BookingExport)
+class BookingExportAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "requested_by",
+        "branch",
+        "status",
+        "record_count",
+        "created_at",
+        "expires_at",
+    )
+    list_filter = ("status", "branch", "created_at")
+    raw_id_fields = ("requested_by", "branch")
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+        "export_started_at",
+        "export_finished_at",
+    )

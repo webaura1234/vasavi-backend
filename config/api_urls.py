@@ -11,4 +11,5 @@ urlpatterns = [
     path("coupons/", include("coupons.urls")),
     path("bookings/", include("bookings.urls")),
     path("support/", include("support.urls")),
+    path("notifications/", include("notifications.urls")),
 ]

@@ -75,6 +75,7 @@ LOCAL_APPS = [
     "bookings.apps.BookingsConfig",
     "coupons.apps.CouponsConfig",
     "support.apps.SupportConfig",
+    "notifications.apps.NotificationsConfig",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -397,6 +398,8 @@ CELERY_TASK_ROUTES = {
     "bookings.tasks.razorpay_verify_payment_webhook": {"queue": "payments"},
     "bookings.tasks.send_booking_confirmation": {"queue": "notifications"},
     "bookings.tasks.booking_status_notification": {"queue": "notifications"},
+    "bookings.tasks.generate_booking_export": {"queue": "exports"},
+    "bookings.tasks.cleanup_expired_booking_exports": {"queue": "maintenance"},
     "donors.tasks.export_donors_data": {"queue": "exports"},
 }
 
@@ -412,6 +415,10 @@ CELERY_BEAT_SCHEDULE = {
     "expire-pending-bookings-every-5min": {
         "task": "bookings.tasks.expire_pending_bookings",
         "schedule": 300.0,  # every 5 minutes
+    },
+    "cleanup-booking-exports-hourly": {
+        "task": "bookings.tasks.cleanup_expired_booking_exports",
+        "schedule": 3600.0,  # every hour
     },
 }
 
@@ -441,6 +448,13 @@ SMS_PROVIDER_ENABLED = env.bool("SMS_PROVIDER_ENABLED", default=False)
 
 DONOR_EXPORT_DIR = BASE_DIR / "media" / "exports" / "donors"
 DONOR_EXPORT_RETENTION_DAYS = env.int("DONOR_EXPORT_RETENTION_DAYS", default=7)
+
+# ---------------------------------------------------------------------------
+# Booking data exports (async xlsx downloads)
+# ---------------------------------------------------------------------------
+
+BOOKING_EXPORT_DIR = BASE_DIR / "media" / "exports" / "bookings"
+BOOKING_EXPORT_RETENTION_DAYS = env.int("BOOKING_EXPORT_RETENTION_DAYS", default=7)
 
 # ---------------------------------------------------------------------------
 # Idempotency (X-Idempotency-Key) — see docs/security.md

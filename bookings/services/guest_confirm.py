@@ -83,6 +83,20 @@ def redeem_coupons_on_booking(
         locked.redeemed_on = now
         locked.save()
 
+        try:
+            from notifications.services import notify_coupon_redeemed
+
+            notify_coupon_redeemed(
+                locked,
+                redeemed_by_user=changed_by,
+                booking=booking,
+            )
+        except Exception:
+            logger.exception(
+                "Could not create coupon redemption notification for coupon %s",
+                locked.serial_number,
+            )
+
 
 def confirm_guest_reservation(
     booking: Booking,

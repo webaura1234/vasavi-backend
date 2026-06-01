@@ -5,6 +5,7 @@ from __future__ import annotations
 from django.db.models import Q, Sum
 from rest_framework import generics
 from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
 
 from donors.models import Donation, DonationPurpose, DonorProfile, MembershipTier
 from donors.serializers import (
@@ -16,6 +17,7 @@ from donors.serializers import (
     DonorProfileSerializer,
     DonorUpdateSerializer,
     MembershipTierSerializer,
+    PublicDonorSerializer,
 )
 from permissions import IsAdminOrAbove, IsDonorOrAbove, IsSuperAdmin
 from utils.responses import error_response, paginated_response, success_response
@@ -138,6 +140,18 @@ class DonationListCreateView(generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         donation = serializer.save()
         donation = self.get_queryset().get(pk=donation.pk)
+
+        try:
+            from notifications.services import notify_donation_received
+
+            notify_donation_received(donation)
+        except Exception:
+            import logging
+
+            logging.getLogger("vasavi.donors").exception(
+                "Could not create donation notification for donation %s", donation.pk
+            )
+
         return success_response(DonationSerializer(donation).data, status=201)
 
 
@@ -221,4 +235,34 @@ class ExportDonorsExcelView(APIView):
         response["Content-Disposition"] = f'attachment; filename="donors_export_{timezone.now().strftime("%Y%m%d%H%M")}.xlsx"'
         wb.save(response)
         return response
+
+
+class PublicDonorListView(generics.ListAPIView):
+    """Public endpoint to list donors for the website."""
+    permission_classes = [AllowAny]
+    serializer_class = PublicDonorSerializer
+
+    def get_queryset(self):
+        qs = DonorProfile.objects.filter(is_deleted=False).select_related(
+            "user", "membership_tier", "for_place"
+        )
+        tier_id = self.request.query_params.get("tier_id")
+        club_name = self.request.query_params.get("club_name")
+        search = self.request.query_params.get("search")
+
+        if tier_id:
+            qs = qs.filter(membership_tier_id=tier_id)
+        if club_name:
+            qs = qs.filter(club_name__icontains=club_name)
+        if search:
+            qs = qs.filter(
+                Q(user__name__icontains=search)
+                | Q(donor_id__icontains=search)
+            )
+        return qs.order_by("-user__date_joined")
+
+    def list(self, request, *args, **kwargs):
+        # We can reuse the standard paginated_response
+        return paginated_response(self.get_queryset(), request, self.get_serializer_class())
+
 

@@ -384,3 +384,22 @@ class DonorUpdateSerializer(serializers.Serializer):
 
         instance.save()
         return instance
+
+
+class PublicDonorSerializer(serializers.ModelSerializer):
+    """Serializer for public donor listings. Excludes sensitive data."""
+    id = serializers.UUIDField(read_only=True)
+    name = serializers.CharField(source="user.name", read_only=True)
+    tier = serializers.CharField(source="membership_tier.name", read_only=True)
+
+    class Meta:
+        model = DonorProfile
+        fields = (
+            "id",
+            "donor_id",
+            "name",
+            "tier",
+            "club_name",
+            "district_code",
+        )
+        read_only_fields = fields

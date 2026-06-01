@@ -18,7 +18,9 @@ from bookings.staff_analytics_views import (
     StaffReportsAnalyticsView,
 )
 from bookings.staff_views import (
-    StaffBookingExportView,
+    StaffBookingExportRequestView,
+    StaffBookingExportStatusView,
+    StaffBookingExportCountView,
     StaffBookingRefundView,
     StaffManualBookingCreateView,
     StaffRefundApprovalView,
@@ -71,7 +73,21 @@ urlpatterns = [
         name="staff-analytics-donors",
     ),
     path("bookings/", StaffManualBookingCreateView.as_view(), name="staff-bookings-create"),
-    path("bookings/export/", StaffBookingExportView.as_view(), name="staff-bookings-export"),
+    path(
+        "bookings/export/",
+        StaffBookingExportRequestView.as_view(),
+        name="staff-bookings-export",
+    ),
+    path(
+        "bookings/export/count/",
+        StaffBookingExportCountView.as_view(),
+        name="staff-bookings-export-count",
+    ),
+    path(
+        "bookings/export/<uuid:pk>/",
+        StaffBookingExportStatusView.as_view(),
+        name="staff-bookings-export-status",
+    ),
     path(
         "bookings/<uuid:pk>/refund/",
         StaffBookingRefundView.as_view(),

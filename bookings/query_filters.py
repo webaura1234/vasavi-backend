@@ -102,6 +102,45 @@ def apply_booking_list_filters(qs: QuerySet, params: Any) -> QuerySet:
     return qs
 
 
+def apply_booking_export_filters(qs: QuerySet, params: Any) -> QuerySet:
+    """Apply all export-specific filters on top of role-scoped queryset.
+
+    Extends ``apply_booking_list_filters`` with additional filter params
+    available in the export modal (room_type_id, room_number, payment_gateway,
+    standalone guest_name).  Branch/city scoping is handled by the caller
+    (``build_booking_export_queryset``) before this function is invoked.
+
+    All lookups use the already-joined ``select_related`` tables, so no
+    additional queries are generated per row.
+    """
+    # --- reuse common filters ------------------------------------------------
+    qs = apply_booking_list_filters(qs, params)
+
+    # --- room type (exact FK match) ------------------------------------------
+    room_type_id = (params.get("room_type_id") or "").strip()
+    if room_type_id:
+        qs = qs.filter(room__room_type_id=room_type_id)
+
+    # --- room number (partial match) -----------------------------------------
+    room_number = (params.get("room_number") or "").strip()
+    if room_number:
+        qs = qs.filter(room__room_number__icontains=room_number)
+
+    # --- payment method / gateway (exact) ------------------------------------
+    payment_gateway = (params.get("payment_gateway") or "").strip()
+    if payment_gateway:
+        qs = qs.filter(payment_gateway=payment_gateway)
+
+    # --- standalone guest name (icontains) -----------------------------------
+    # Note: the shared ``q`` param already searches guest_name, phone,
+    # reference, room.  This param allows filtering by guest name alone.
+    guest_name = (params.get("guest_name") or "").strip()
+    if guest_name:
+        qs = qs.filter(guest_name__icontains=guest_name)
+
+    return qs
+
+
 def compute_booking_list_summary(qs: QuerySet) -> dict[str, int]:
     """Aggregate counts for the current filtered queryset (one query)."""
     agg = qs.aggregate(

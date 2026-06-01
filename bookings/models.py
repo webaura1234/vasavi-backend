@@ -481,3 +481,106 @@ class BookingStatusLog(TimeStampedModel):
             f"{self.booking.booking_reference}: "
             f"{self.from_status} → {self.to_status}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Booking Export (async xlsx export job tracker)
+# ---------------------------------------------------------------------------
+
+
+class BookingExport(TimeStampedModel):
+    """Tracks an asynchronous xlsx booking export job.
+
+    Lifecycle: PENDING → PROCESSING → READY (file ready for download)
+                                    → FAILED (error, can retry)
+
+    The ``filters_applied`` JSON field is an immutable audit snapshot of
+    every filter and the requesting user's role at export time.
+
+    Files are stored in ``BOOKING_EXPORT_DIR`` and auto-deleted after
+    ``BOOKING_EXPORT_RETENTION_DAYS`` days via the Celery Beat cleanup task.
+    """
+
+    class Status(models.TextChoices):
+        PENDING    = "pending",    "Pending"
+        PROCESSING = "processing", "Processing"
+        READY      = "ready",      "Ready"
+        FAILED     = "failed",     "Failed"
+
+    # -- who and scope --------------------------------------------------------
+
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="booking_exports",
+        help_text="Staff user who triggered this export.",
+    )
+    branch = models.ForeignKey(
+        "branches.Branch",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        help_text="Branch scope at export time. NULL = all branches (super_admin).",
+    )
+
+    # -- job state ------------------------------------------------------------
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+
+    # -- audit snapshot (immutable once written) ------------------------------
+
+    filters_applied = models.JSONField(
+        default=dict,
+        help_text=(
+            "Snapshot of all filters + requesting user role at export time. "
+            "Serves as the audit log — never mutated after creation."
+        ),
+    )
+
+    # -- result ---------------------------------------------------------------
+
+    file_path    = models.CharField(max_length=500, blank=True, help_text="Absolute path on disk.")
+    download_url = models.CharField(max_length=500, blank=True, help_text="Relative MEDIA_URL path.")
+    record_count = models.PositiveIntegerField(null=True, blank=True)
+    error_message = models.TextField(blank=True)
+
+    # -- TTL ------------------------------------------------------------------
+
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="File is deleted and status set to FAILED after this timestamp.",
+    )
+
+    # -- timing ---------------------------------------------------------------
+
+    export_started_at  = models.DateTimeField(null=True, blank=True)
+    export_finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "booking export"
+        verbose_name_plural = "booking exports"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["requested_by", "status"],
+                name="idx_bkgexport_user_status",
+            ),
+            models.Index(
+                fields=["status", "expires_at"],
+                name="idx_bkgexport_status_expires",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"BookingExport [{self.status}] "
+            f"by {getattr(self.requested_by, 'phone', self.requested_by_id)} "
+            f"at {self.created_at}"
+        )

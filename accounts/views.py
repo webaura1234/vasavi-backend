@@ -279,6 +279,17 @@ class ProfileConfirmView(generics.RetrieveUpdateAPIView):
             if "name" in body.validated_data:
                 user.name = body.validated_data["name"]
                 user.save(update_fields=["name", "updated_at"])
+                try:
+                    from notifications.services import notify_profile_updated
+
+                    notify_profile_updated(user)
+                except Exception:
+                    import logging
+
+                    logging.getLogger("vasavi.accounts").exception(
+                        "Could not create profile updated notification for user %s",
+                        user.pk,
+                    )
             return success_response(UserProfileSerializer(user).data)
 
         body = ProfileConfirmSerializer(data=request.data, partial=True)
@@ -294,6 +305,17 @@ class ProfileConfirmView(generics.RetrieveUpdateAPIView):
 
         user.is_first_login = False
         user.save(update_fields=["is_first_login", "updated_at"])
+
+        try:
+            from notifications.services import notify_account_approved
+
+            notify_account_approved(user)
+        except Exception:
+            import logging
+
+            logging.getLogger("vasavi.accounts").exception(
+                "Could not create account approved notification for user %s", user.pk
+            )
 
         return success_response(
             {

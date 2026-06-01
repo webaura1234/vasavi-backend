@@ -10,12 +10,14 @@ from donors.views import (
     DonorMeView,
     MembershipTierListCreateView,
     ExportDonorsExcelView,
+    PublicDonorListView,
 )
 
 app_name = "donors"
 
 urlpatterns = [
     path("me/", DonorMeView.as_view(), name="donor-me"),
+    path("public/", PublicDonorListView.as_view(), name="donor-public-list"),
     path("export/", ExportDonorsExcelView.as_view(), name="donor-export"),
     path("", DonorListCreateView.as_view(), name="donor-list"),
     path("<uuid:pk>/", DonorDetailView.as_view(), name="donor-detail"),
