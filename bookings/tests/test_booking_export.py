@@ -1,5 +1,6 @@
 """Tests for Bookings Export System with role-based restrictions."""
 
+import uuid
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -116,7 +117,12 @@ class BookingExportTests(TestCase):
         client = self._get_authenticated_client(self.admin_a)
         # Attempt to export data for Branch B
         payload = {"branch_id": str(self.branch_b.pk)}
-        response = client.post("/api/v1/staff/bookings/export/", payload, format="json")
+        response = client.post(
+            "/api/v1/staff/bookings/export/",
+            payload,
+            format="json",
+            HTTP_X_IDEMPOTENCY_KEY=str(uuid.uuid4()),
+        )
         self.assertEqual(response.status_code, 202)
         
         # Verify the database entry has branch set to self.branch_a, NOT branch_b
@@ -134,7 +140,12 @@ class BookingExportTests(TestCase):
         client = self._get_authenticated_client(self.super_admin)
         # Super Admin explicitly filters to Branch B
         payload = {"branch_id": str(self.branch_b.pk)}
-        response = client.post("/api/v1/staff/bookings/export/", payload, format="json")
+        response = client.post(
+            "/api/v1/staff/bookings/export/",
+            payload,
+            format="json",
+            HTTP_X_IDEMPOTENCY_KEY=str(uuid.uuid4()),
+        )
         self.assertEqual(response.status_code, 202)
         
         export_id = response.json()["data"]["export_id"]

@@ -55,8 +55,10 @@ class RoomListCreateView(generics.ListCreateAPIView):
         return RoomSerializer
 
     def get_queryset(self):
-        qs = Room.objects.filter(is_deleted=False, is_active=True).select_related(
-            "branch", "room_type"
+        qs = (
+            Room.objects.filter(is_deleted=False, is_active=True)
+            .select_related("branch", "room_type")
+            .prefetch_related("images")
         )
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
@@ -70,13 +72,23 @@ class RoomListCreateView(generics.ListCreateAPIView):
         serializer = RoomWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         room = serializer.save()
-        room = Room.objects.select_related("branch", "room_type").get(pk=room.pk)
-        return success_response(RoomSerializer(room).data, status=201)
+        room = (
+            Room.objects.select_related("branch", "room_type")
+            .prefetch_related("images")
+            .get(pk=room.pk)
+        )
+        return success_response(
+            RoomSerializer(room, context={"request": request}).data, status=201
+        )
 
 
 class RoomDetailView(generics.RetrieveUpdateDestroyAPIView):
     lookup_field = "pk"
-    queryset = Room.objects.filter(is_deleted=False).select_related("branch", "room_type")
+    queryset = (
+        Room.objects.filter(is_deleted=False)
+        .select_related("branch", "room_type")
+        .prefetch_related("images")
+    )
 
     def get_permissions(self):
         if self.request.method == "GET":
@@ -89,7 +101,9 @@ class RoomDetailView(generics.RetrieveUpdateDestroyAPIView):
         return RoomSerializer
 
     def retrieve(self, request, *args, **kwargs):
-        return success_response(RoomSerializer(self.get_object()).data)
+        return success_response(
+            RoomSerializer(self.get_object(), context={"request": request}).data
+        )
 
     def partial_update(self, request, *args, **kwargs):
         room = self.get_object()
@@ -97,7 +111,9 @@ class RoomDetailView(generics.RetrieveUpdateDestroyAPIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         room.refresh_from_db()
-        return success_response(RoomSerializer(room).data)
+        return success_response(
+            RoomSerializer(room, context={"request": request}).data
+        )
 
     def patch(self, request, *args, **kwargs):
         return self.partial_update(request, *args, **kwargs)
@@ -122,7 +138,7 @@ class RoomSearchView(APIView):
             is_active=True,
             operational_status="available",
             capacity__gte=data["guests"],
-        ).select_related("branch", "room_type")
+        ).select_related("branch", "room_type").prefetch_related("images")
 
         if data.get("branch_id"):
             qs = qs.filter(branch_id=data["branch_id"])
@@ -154,7 +170,10 @@ class RoomSearchView(APIView):
         for room in qs:
             is_available = room.pk not in booked_room_ids
             unavailable_reason = None if is_available else "Already booked for these dates."
-            payload = RoomAvailabilitySerializer(room).data
+            serializer = RoomAvailabilitySerializer(
+                room, context={"request": request}
+            )
+            payload = serializer.data
             payload["is_available"] = is_available
             payload["unavailable_reason"] = unavailable_reason
             results.append(payload)

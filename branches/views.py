@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from django.db import transaction
 from django.utils import timezone
-from rest_framework import generics
+from rest_framework import generics, status
 
 from accounts.branch_scope import staff_branch_id
-from accounts.models import AdminBranch
+from accounts.models import AdminBranch, User
 from branches.models import Branch
 from branches.serializers import (
     AdminBranchSerializer,
     AssignAdminSerializer,
     BranchCreateSerializer,
     BranchSerializer,
+    RevokeAdminSerializer,
 )
 from permissions import IsAdminOrAbove, IsPublic, IsSuperAdmin
 from utils.responses import error_response, paginated_response, success_response
@@ -124,4 +126,57 @@ class AssignAdminToBranchView(generics.GenericAPIView):
         return success_response(
             AdminBranchSerializer(assignment).data,
             message="Branch admin assigned.",
+        )
+
+
+def _blacklist_user_refresh_tokens(user: User) -> None:
+    """Invalidate outstanding JWT refresh tokens so revoked staff cannot stay signed in."""
+    try:
+        from rest_framework_simplejwt.token_blacklist.models import (
+            BlacklistedToken,
+            OutstandingToken,
+        )
+    except ImportError:
+        return
+
+    for outstanding in OutstandingToken.objects.filter(user_id=user.pk):
+        BlacklistedToken.objects.get_or_create(token=outstanding)
+
+
+class RevokeAdminFromBranchView(generics.GenericAPIView):
+    """Remove a branch admin's assignment and deactivate their staff portal access."""
+
+    permission_classes = [IsSuperAdmin]
+    serializer_class = RevokeAdminSerializer
+
+    def post(self, request, pk, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user_id"]
+
+        try:
+            branch = Branch.objects.get(pk=pk, is_deleted=False)
+        except Branch.DoesNotExist:
+            return error_response("NOT_FOUND", "Branch not found.", status=404)
+
+        try:
+            assignment = AdminBranch.objects.select_related("user", "branch").get(
+                user=user, branch=branch
+            )
+        except AdminBranch.DoesNotExist:
+            return error_response(
+                "NOT_FOUND",
+                "This admin is not assigned to this branch.",
+                status=404,
+            )
+
+        with transaction.atomic():
+            assignment.delete()
+            user.is_active = False
+            user.save(update_fields=["is_active", "updated_at"])
+            _blacklist_user_refresh_tokens(user)
+
+        return success_response(
+            message=f"Branch access revoked for {user.name or user.phone}.",
+            status=status.HTTP_200_OK,
         )

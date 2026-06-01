@@ -69,6 +69,10 @@ class Booking(SoftDeleteModel):
         SUPER_ADMIN = "super_admin", "Super Admin"
         SYSTEM = "system", "System (auto-expired)"
 
+    class BookingKind(models.TextChoices):
+        ROOM = "room", "Room"
+        FUNCTION_HALL = "function_hall", "Function Hall"
+
     # -- fields --------------------------------------------------------------
 
     booking_reference = models.CharField(
@@ -87,14 +91,31 @@ class Booking(SoftDeleteModel):
     room = models.ForeignKey(
         "properties.Room",
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
         related_name="bookings",
-        help_text="The room being booked.",
+        help_text="The room being booked. Mutually exclusive with function_hall.",
+    )
+    function_hall = models.ForeignKey(
+        "properties.FunctionHall",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="bookings",
+        help_text="The function hall being booked. Mutually exclusive with room.",
+    )
+    booking_kind = models.CharField(
+        max_length=20,
+        choices=BookingKind.choices,
+        default=BookingKind.ROOM,
+        db_index=True,
+        help_text="Discriminator: whether this booking is for a room or function hall.",
     )
     branch = models.ForeignKey(
         "branches.Branch",
         on_delete=models.PROTECT,
         related_name="bookings",
-        help_text="Denormalised from room.branch for query performance.",
+        help_text="Denormalised from room or function_hall for query performance.",
     )
 
     # -- dates ---------------------------------------------------------------
@@ -279,6 +300,10 @@ class Booking(SoftDeleteModel):
                 fields=["payment_status"],
                 name="idx_booking_payment_status",
             ),
+            models.Index(
+                fields=["function_hall", "check_in_date", "check_out_date"],
+                name="idx_booking_hall_dates",
+            ),
         ]
         constraints = [
             models.CheckConstraint(
@@ -300,6 +325,13 @@ class Booking(SoftDeleteModel):
             models.CheckConstraint(
                 check=Q(refund_amount__gte=0),
                 name="booking_refund_amount_non_negative",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(room__isnull=False, function_hall__isnull=True)
+                    | Q(room__isnull=True, function_hall__isnull=False)
+                ),
+                name="chk_booking_exactly_one_resource",
             ),
         ]
 
@@ -335,11 +367,31 @@ class Booking(SoftDeleteModel):
             and self.refund_requested_at is not None
         )
 
+    @property
+    def bookable_resource(self):
+        """The room or function hall this booking reserves."""
+        return self.room or self.function_hall
+
     # -- validation ----------------------------------------------------------
 
     def clean(self) -> None:
         """Validate booking business rules."""
         super().clean()
+
+        has_room = self.room_id is not None
+        has_hall = self.function_hall_id is not None
+        if has_room == has_hall:
+            raise ValidationError(
+                "Exactly one of room or function_hall must be set."
+            )
+        if self.booking_kind == self.BookingKind.ROOM and has_hall:
+            raise ValidationError(
+                {"booking_kind": "Room bookings cannot reference a function hall."}
+            )
+        if self.booking_kind == self.BookingKind.FUNCTION_HALL and has_room:
+            raise ValidationError(
+                {"booking_kind": "Function hall bookings cannot reference a room."}
+            )
 
         if self.check_in_date and self.check_out_date:
             if self.check_out_date <= self.check_in_date:
@@ -415,9 +467,11 @@ class Booking(SoftDeleteModel):
                     "Could not generate a unique booking reference after 10 attempts."
                 )
 
-        # Denormalise branch from room
+        # Denormalise branch from bookable resource
         if self.room_id:
             self.branch_id = self.room.branch_id
+        elif self.function_hall_id:
+            self.branch_id = self.function_hall.branch_id
 
         # Compute nights
         if self.check_in_date and self.check_out_date:

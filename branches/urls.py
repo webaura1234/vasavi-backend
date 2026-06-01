@@ -2,7 +2,12 @@
 
 from django.urls import path
 
-from branches.views import AssignAdminToBranchView, BranchDetailView, BranchListCreateView
+from branches.views import (
+    AssignAdminToBranchView,
+    BranchDetailView,
+    BranchListCreateView,
+    RevokeAdminFromBranchView,
+)
 
 app_name = "branches"
 
@@ -13,5 +18,10 @@ urlpatterns = [
         "<uuid:pk>/assign-admin/",
         AssignAdminToBranchView.as_view(),
         name="branch-assign-admin",
+    ),
+    path(
+        "<uuid:pk>/revoke-admin/",
+        RevokeAdminFromBranchView.as_view(),
+        name="branch-revoke-admin",
     ),
 ]

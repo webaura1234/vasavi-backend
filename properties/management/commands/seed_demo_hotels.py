@@ -12,7 +12,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from branches.models import Branch
-from properties.models import Room, RoomType
+from properties.models import FunctionHall, Room, RoomType
 
 # Mirrors vasavi-main-site HOTELS_RAW (mock id → property metadata)
 DEMO_HOTELS = [
@@ -68,6 +68,15 @@ ROOM_SPECS = [
     ("Deluxe", 2, 1.5),
     ("Suite", 4, 2.0),
 ]
+
+# One function hall per demo branch (paise per day ≈ 3× base nightly rate × capacity factor)
+HALL_BY_CITY = {
+    "Hyderabad": ("Vasavi Grand Banquet Hall", 250, 75_000_00),
+    "Tirupati": ("Pilgrim Community Hall", 180, 45_000_00),
+    "Vijayawada": ("Kanyaka Convention Hall", 220, 60_000_00),
+    "Visakhapatnam": ("Ocean View Function Hall", 200, 55_000_00),
+    "Bengaluru": ("Royal Heritage Hall", 280, 85_000_00),
+}
 
 
 class Command(BaseCommand):
@@ -130,6 +139,46 @@ class Command(BaseCommand):
                         "is_deleted": False,
                     },
                 )
+
+            hall_name, hall_capacity, hall_price = HALL_BY_CITY.get(
+                spec["city"],
+                (f"{spec['name']} Function Hall", 150, 40_000_00),
+            )
+            existing_hall = FunctionHall.objects.filter(
+                branch=branch, is_deleted=False
+            ).first()
+            if existing_hall:
+                existing_hall.name = hall_name
+                existing_hall.capacity = hall_capacity
+                existing_hall.base_price_per_day = hall_price
+                existing_hall.is_active = True
+                existing_hall.operational_status = "available"
+                existing_hall.amenities = [
+                    "AC",
+                    "Stage",
+                    "Sound system",
+                    "Catering kitchen access",
+                ]
+                existing_hall.save()
+                hall_action = "Updated hall"
+            else:
+                FunctionHall.objects.create(
+                    branch=branch,
+                    name=hall_name,
+                    capacity=hall_capacity,
+                    base_price_per_day=hall_price,
+                    description="Demo function hall for events and gatherings.",
+                    amenities=[
+                        "AC",
+                        "Stage",
+                        "Sound system",
+                        "Catering kitchen access",
+                    ],
+                    is_active=True,
+                    operational_status="available",
+                )
+                hall_action = "Created hall"
+            self.stdout.write(self.style.SUCCESS(f"  {hall_action}: {hall_name}"))
 
             action = "Created" if created else "Updated"
             self.stdout.write(

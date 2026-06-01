@@ -15,6 +15,15 @@ from coupons.models import Coupon
 logger = logging.getLogger("vasavi.bookings.guest_confirm")
 
 
+def compute_booking_base_amount(booking: Booking) -> int:
+    """Base amount in paise from the booked room or function hall × nights."""
+    if booking.room_id:
+        return booking.room.base_price_per_night * booking.nights
+    if booking.function_hall_id:
+        return booking.function_hall.base_price_per_day * booking.nights
+    raise ValueError("Booking has no room or function hall.")
+
+
 def _notify_confirmation(booking: Booking) -> None:
     booking_id = str(booking.pk)
     try:
@@ -118,13 +127,13 @@ def confirm_guest_reservation(
     with transaction.atomic():
         booking = (
             Booking.objects.select_for_update()
-            .select_related("room", "branch")
+            .select_related("room", "function_hall", "branch")
             .get(pk=booking.pk)
         )
         if booking.status != Booking.Status.PENDING:
             raise ValueError("Only pending bookings can be confirmed.")
 
-        base_amount = booking.room.base_price_per_night * booking.nights
+        base_amount = compute_booking_base_amount(booking)
         discount_amount, final_amount = compute_coupon_discount(base_amount, coupons)
 
         redeem_coupons_on_booking(booking, coupons, changed_by=changed_by)

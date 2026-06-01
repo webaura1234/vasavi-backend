@@ -11,11 +11,15 @@ from rest_framework import serializers
 from accounts.serializers import UserProfileSerializer
 from bookings.messages import status_transition_not_allowed
 from bookings.models import Booking, BookingStatusLog
+from bookings.services.availability import (
+    check_availability_with_lock,
+)
 from bookings.services.pricing import compute_coupon_discount
 from branches.serializers import BranchSerializer
 from coupons.models import Coupon
 from coupons.serializers import CouponSerializer
-from properties.models import Room
+from properties.function_hall_serializers import FunctionHallSerializer
+from properties.models import FunctionHall, Room
 from properties.serializers import RoomSerializer
 from utils.money import paise_to_rupees_display
 
@@ -24,6 +28,8 @@ class BookingSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
     user = UserProfileSerializer(read_only=True)
     room = RoomSerializer(read_only=True)
+    function_hall = FunctionHallSerializer(read_only=True)
+    booking_kind = serializers.CharField(read_only=True)
     branch = BranchSerializer(read_only=True)
     base_amount_display = serializers.SerializerMethodField()
     discount_display = serializers.SerializerMethodField()
@@ -42,6 +48,8 @@ class BookingSerializer(serializers.ModelSerializer):
             "booking_reference",
             "user",
             "room",
+            "function_hall",
+            "booking_kind",
             "branch",
             "check_in_date",
             "check_out_date",
@@ -90,7 +98,8 @@ class BookingSerializer(serializers.ModelSerializer):
 
 
 class BookingCreateSerializer(serializers.Serializer):
-    room_id = serializers.UUIDField()
+    room_id = serializers.UUIDField(required=False)
+    function_hall_id = serializers.UUIDField(required=False)
     check_in_date = serializers.DateField()
     check_out_date = serializers.DateField()
     guest_count = serializers.IntegerField(default=1, min_value=1)
@@ -103,11 +112,9 @@ class BookingCreateSerializer(serializers.Serializer):
     )
     notes = serializers.CharField(required=False, allow_blank=True)
 
-    def validate(self, attrs):
+    def _validate_dates(self, attrs):
         check_in = attrs["check_in_date"]
         check_out = attrs["check_out_date"]
-
-        # --- Date validations -----------------------------------------------
         if check_out <= check_in:
             raise serializers.ValidationError(
                 {"check_out_date": "Check-out must be after check-in."}
@@ -122,40 +129,96 @@ class BookingCreateSerializer(serializers.Serializer):
                 {"check_out_date": "Maximum stay is 30 nights."}
             )
         attrs["nights"] = nights
-
-        # --- Room validations -----------------------------------------------
-        try:
-            room = Room.objects.select_related("branch").get(
-                pk=attrs["room_id"],
-                is_deleted=False,
-                is_active=True,
-            )
-        except Room.DoesNotExist as exc:
-            raise serializers.ValidationError({"room_id": "Room not found."}) from exc
-
-        # Operational status check
-        if room.operational_status != "available":
-            raise serializers.ValidationError(
-                {"room_id": f"This room is currently {room.operational_status} and cannot be booked."}
-            )
-
-        # Donor-exclusive rooms
-        request = self.context["request"]
-        if room.is_donor_exclusive and request.user.role not in ("donor", "admin", "super_admin"):
-            raise serializers.ValidationError(
-                {"room_id": "This room is reserved for donors only."}
-            )
-
-        # Guest count vs capacity
-        guest_count = attrs.get("guest_count", 1)
-        if guest_count > room.capacity:
-            raise serializers.ValidationError(
-                {"guest_count": f"This room accommodates a maximum of {room.capacity} guest(s)."}
-            )
-
-        attrs["room"] = room
         attrs["check_in"] = check_in
         attrs["check_out"] = check_out
+        return attrs
+
+    def validate(self, attrs):
+        has_room = bool(attrs.get("room_id"))
+        has_hall = bool(attrs.get("function_hall_id"))
+        if has_room == has_hall:
+            raise serializers.ValidationError(
+                "Provide exactly one of room_id or function_hall_id.",
+                code="invalid_resource",
+            )
+
+        attrs = self._validate_dates(attrs)
+        request = self.context["request"]
+        guest_count = attrs.get("guest_count", 1)
+
+        if has_room:
+            try:
+                room = Room.objects.select_related("branch").get(
+                    pk=attrs["room_id"],
+                    is_deleted=False,
+                    is_active=True,
+                )
+            except Room.DoesNotExist as exc:
+                raise serializers.ValidationError({"room_id": "Room not found."}) from exc
+
+            if room.operational_status != "available":
+                raise serializers.ValidationError(
+                    {
+                        "room_id": (
+                            f"This room is currently {room.operational_status} "
+                            "and cannot be booked."
+                        )
+                    }
+                )
+
+            if room.is_donor_exclusive and request.user.role not in (
+                "donor",
+                "admin",
+                "super_admin",
+            ):
+                raise serializers.ValidationError(
+                    {"room_id": "This room is reserved for donors only."}
+                )
+
+            if guest_count > room.capacity:
+                raise serializers.ValidationError(
+                    {
+                        "guest_count": (
+                            f"This room accommodates a maximum of {room.capacity} guest(s)."
+                        )
+                    }
+                )
+
+            attrs["room"] = room
+            attrs["booking_kind"] = Booking.BookingKind.ROOM
+        else:
+            try:
+                hall = FunctionHall.objects.select_related("branch").get(
+                    pk=attrs["function_hall_id"],
+                    is_deleted=False,
+                    is_active=True,
+                )
+            except FunctionHall.DoesNotExist as exc:
+                raise serializers.ValidationError(
+                    {"function_hall_id": "Function hall not found."}
+                ) from exc
+
+            if hall.operational_status != "available":
+                raise serializers.ValidationError(
+                    {
+                        "function_hall_id": (
+                            f"This hall is currently {hall.operational_status} "
+                            "and cannot be booked."
+                        )
+                    }
+                )
+
+            if guest_count > hall.capacity:
+                raise serializers.ValidationError(
+                    {
+                        "guest_count": (
+                            f"This hall accommodates a maximum of {hall.capacity} guest(s)."
+                        )
+                    }
+                )
+
+            attrs["function_hall"] = hall
+            attrs["booking_kind"] = Booking.BookingKind.FUNCTION_HALL
 
         # --- Coupon validations ---------------------------------------------
         coupon_ids = attrs.get("coupon_ids") or []
@@ -193,70 +256,85 @@ class BookingCreateSerializer(serializers.Serializer):
         attrs["coupons"] = coupons
         return attrs
 
-    def _room_is_available(self, room: Room, check_in: date, check_out: date) -> bool:
-        """Check both operational status and booking overlap."""
-        if room.operational_status != "available":
-            return False
-        return not Booking.objects.filter(
-            room=room,
-            status__in=[
-                Booking.Status.PENDING,
-                Booking.Status.CONFIRMED,
-                Booking.Status.CHECKED_IN,
-            ],
-            check_in_date__lt=check_out,
-            check_out_date__gt=check_in,
-            is_deleted=False,
-        ).exists()
-
     def create(self, validated_data):
         request = self.context["request"]
-        room = validated_data["room"]
         check_in = validated_data["check_in"]
         check_out = validated_data["check_out"]
         nights = validated_data["nights"]
         coupons = validated_data.get("coupons", [])
+        booking_kind = validated_data["booking_kind"]
 
-        base_amount = room.base_price_per_night * nights
-        discount_amount, final_amount = compute_coupon_discount(base_amount, coupons)
+        user = request.user
+        guest_name = (validated_data.get("guest_name") or "").strip() or (
+            user.name or ""
+        )
+        guest_phone = (validated_data.get("guest_phone") or "").strip() or (
+            user.phone or ""
+        )
+
+        common_booking_fields = {
+            "user": user,
+            "check_in_date": validated_data["check_in_date"],
+            "check_out_date": validated_data["check_out_date"],
+            "nights": nights,
+            "guest_count": validated_data.get("guest_count", 1),
+            "guest_name": guest_name,
+            "guest_phone": guest_phone,
+            "status": Booking.Status.PENDING,
+            "payment_status": Booking.PaymentStatus.UNPAID,
+            "notes": validated_data.get("notes", ""),
+            "booking_kind": booking_kind,
+        }
 
         with transaction.atomic():
-            # Lock room row to prevent concurrent double-bookings.
-            room = Room.objects.select_for_update().get(
-                pk=room.pk,
-                is_deleted=False,
-                is_active=True,
-            )
-            if not self._room_is_available(room, check_in, check_out):
-                raise serializers.ValidationError(
-                    {"room_id": "Room is not available for the selected dates."}
+            if booking_kind == Booking.BookingKind.ROOM:
+                room = validated_data["room"]
+                base_amount = room.base_price_per_night * nights
+                discount_amount, final_amount = compute_coupon_discount(
+                    base_amount, coupons
                 )
-
-            user = request.user
-            guest_name = (validated_data.get("guest_name") or "").strip() or (
-                user.name or ""
-            )
-            guest_phone = (validated_data.get("guest_phone") or "").strip() or (
-                user.phone or ""
-            )
-
-            # Hold the room while the guest completes blessings / payment steps.
-            booking = Booking.objects.create(
-                user=user,
-                room=room,
-                check_in_date=validated_data["check_in_date"],
-                check_out_date=validated_data["check_out_date"],
-                nights=nights,
-                guest_count=validated_data.get("guest_count", 1),
-                guest_name=guest_name,
-                guest_phone=guest_phone,
-                status=Booking.Status.PENDING,
-                base_amount=base_amount,
-                discount_amount=discount_amount,
-                final_amount=final_amount,
-                payment_status=Booking.PaymentStatus.UNPAID,
-                notes=validated_data.get("notes", ""),
-            )
+                room = Room.objects.select_for_update().get(
+                    pk=room.pk,
+                    is_deleted=False,
+                    is_active=True,
+                )
+                if not check_availability_with_lock(room, check_in, check_out):
+                    raise serializers.ValidationError(
+                        {"room_id": "Room is not available for the selected dates."}
+                    )
+                booking = Booking.objects.create(
+                    room=room,
+                    base_amount=base_amount,
+                    discount_amount=discount_amount,
+                    final_amount=final_amount,
+                    **common_booking_fields,
+                )
+            else:
+                hall = validated_data["function_hall"]
+                base_amount = hall.base_price_per_day * nights
+                discount_amount, final_amount = compute_coupon_discount(
+                    base_amount, coupons
+                )
+                hall = FunctionHall.objects.select_for_update().get(
+                    pk=hall.pk,
+                    is_deleted=False,
+                    is_active=True,
+                )
+                if not check_availability_with_lock(hall, check_in, check_out):
+                    raise serializers.ValidationError(
+                        {
+                            "function_hall_id": (
+                                "Function hall is not available for the selected dates."
+                            )
+                        }
+                    )
+                booking = Booking.objects.create(
+                    function_hall=hall,
+                    base_amount=base_amount,
+                    discount_amount=discount_amount,
+                    final_amount=final_amount,
+                    **common_booking_fields,
+                )
 
             if coupons:
                 from bookings.services.guest_confirm import redeem_coupons_on_booking

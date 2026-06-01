@@ -10,13 +10,15 @@ from rest_framework import serializers
 
 from accounts.models import AdminBranch, User
 from bookings.models import Booking, BookingStatusLog
+from bookings.services.availability import check_availability_with_lock
 from bookings.services.payments import confirm_cash_payment
-from properties.models import Room
+from properties.models import FunctionHall, Room
 from utils.phone import is_valid_indian_phone, normalize_indian_phone
 
 
 class StaffManualBookingCreateSerializer(serializers.Serializer):
-    room_id = serializers.UUIDField()
+    room_id = serializers.UUIDField(required=False)
+    function_hall_id = serializers.UUIDField(required=False)
     check_in_date = serializers.DateField()
     check_out_date = serializers.DateField()
     guest_count = serializers.IntegerField(default=1, min_value=1)
@@ -54,51 +56,96 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
                 {"check_out_date": "Maximum stay is 30 nights."}
             )
         attrs["nights"] = nights
+        attrs["check_in"] = check_in
+        attrs["check_out"] = check_out
 
-        try:
-            room = Room.objects.select_related("branch").get(
-                pk=attrs["room_id"],
-                is_deleted=False,
-                is_active=True,
+        has_room = bool(attrs.get("room_id"))
+        has_hall = bool(attrs.get("function_hall_id"))
+        if has_room == has_hall:
+            raise serializers.ValidationError(
+                "Provide exactly one of room_id or function_hall_id.",
+                code="invalid_resource",
             )
-        except Room.DoesNotExist as exc:
-            raise serializers.ValidationError({"room_id": "Room not found."}) from exc
 
         staff = self.context["request"].user
-        if staff.role == "admin":
+        guest_count = attrs.get("guest_count", 1)
+
+        def _enforce_branch_scope(resource_branch_id):
+            if staff.role != "admin":
+                return
             try:
                 admin_branch = staff.admin_branch.branch
             except AdminBranch.DoesNotExist as exc:
                 raise serializers.ValidationError(
-                    {"room_id": "Your account is not assigned to a branch."}
+                    {"branch": "Your account is not assigned to a branch."}
                 ) from exc
-            if room.branch_id != admin_branch.id:
+            if resource_branch_id != admin_branch.id:
                 raise serializers.ValidationError(
-                    {"room_id": "This room is outside your assigned branch."}
+                    {"branch": "This resource is outside your assigned branch."}
                 )
 
-        if room.capacity < attrs.get("guest_count", 1):
-            raise serializers.ValidationError(
-                {"guest_count": f"Room capacity is {room.capacity} guests."}
-            )
+        if has_room:
+            try:
+                room = Room.objects.select_related("branch").get(
+                    pk=attrs["room_id"],
+                    is_deleted=False,
+                    is_active=True,
+                )
+            except Room.DoesNotExist as exc:
+                raise serializers.ValidationError({"room_id": "Room not found."}) from exc
 
-        attrs["room"] = room
-        attrs["check_in"] = check_in
-        attrs["check_out"] = check_out
+            _enforce_branch_scope(room.branch_id)
+
+            if guest_count > room.capacity:
+                raise serializers.ValidationError(
+                    {"guest_count": f"Room capacity is {room.capacity} guests."}
+                )
+
+            if room.operational_status != "available":
+                raise serializers.ValidationError(
+                    {
+                        "room_id": (
+                            f"This room is currently {room.operational_status} "
+                            "and cannot be booked."
+                        )
+                    }
+                )
+
+            attrs["room"] = room
+            attrs["booking_kind"] = Booking.BookingKind.ROOM
+        else:
+            try:
+                hall = FunctionHall.objects.select_related("branch").get(
+                    pk=attrs["function_hall_id"],
+                    is_deleted=False,
+                    is_active=True,
+                )
+            except FunctionHall.DoesNotExist as exc:
+                raise serializers.ValidationError(
+                    {"function_hall_id": "Function hall not found."}
+                ) from exc
+
+            _enforce_branch_scope(hall.branch_id)
+
+            if guest_count > hall.capacity:
+                raise serializers.ValidationError(
+                    {"guest_count": f"Hall capacity is {hall.capacity} guests."}
+                )
+
+            if hall.operational_status != "available":
+                raise serializers.ValidationError(
+                    {
+                        "function_hall_id": (
+                            f"This hall is currently {hall.operational_status} "
+                            "and cannot be booked."
+                        )
+                    }
+                )
+
+            attrs["function_hall"] = hall
+            attrs["booking_kind"] = Booking.BookingKind.FUNCTION_HALL
+
         return attrs
-
-    def _room_has_overlap(self, room: Room, check_in: date, check_out: date) -> bool:
-        return Booking.objects.filter(
-            room=room,
-            status__in=[
-                Booking.Status.PENDING,
-                Booking.Status.CONFIRMED,
-                Booking.Status.CHECKED_IN,
-            ],
-            check_in_date__lt=check_out,
-            check_out_date__gt=check_in,
-            is_deleted=False,
-        ).exists()
 
     def _resolve_guest_user(self, phone: str, name: str) -> User:
         existing = User.objects.filter(phone=phone, is_deleted=False).first()
@@ -133,7 +180,6 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         staff = self.context["request"].user
-        room = validated_data["room"]
         check_in = validated_data["check_in"]
         check_out = validated_data["check_out"]
         nights = validated_data["nights"]
@@ -141,41 +187,77 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
         guest_phone = validated_data["guest_phone"]
         record_cash = validated_data.get("record_cash_payment", False)
         check_in_now = validated_data.get("check_in_immediately", False)
+        booking_kind = validated_data["booking_kind"]
         notes = self._compose_notes(
             validated_data.get("source", "walk_in"),
             validated_data.get("notes", ""),
         )
 
-        base_amount = room.base_price_per_night * nights
         guest_user = self._resolve_guest_user(guest_phone, guest_name)
 
         with transaction.atomic():
-            room = Room.objects.select_for_update().get(
-                pk=room.pk,
-                is_deleted=False,
-                is_active=True,
-            )
-            if self._room_has_overlap(room, check_in, check_out):
-                raise serializers.ValidationError(
-                    {"room_id": "Room is not available for the selected dates."}
+            if booking_kind == Booking.BookingKind.ROOM:
+                room = validated_data["room"]
+                base_amount = room.base_price_per_night * nights
+                room = Room.objects.select_for_update().get(
+                    pk=room.pk,
+                    is_deleted=False,
+                    is_active=True,
                 )
-
-            booking = Booking.objects.create(
-                user=guest_user,
-                room=room,
-                check_in_date=validated_data["check_in_date"],
-                check_out_date=validated_data["check_out_date"],
-                nights=nights,
-                guest_count=validated_data.get("guest_count", 1),
-                guest_name=guest_name,
-                guest_phone=guest_phone,
-                status=Booking.Status.PENDING,
-                base_amount=base_amount,
-                discount_amount=0,
-                final_amount=base_amount,
-                payment_status=Booking.PaymentStatus.UNPAID,
-                notes=notes,
-            )
+                if not check_availability_with_lock(room, check_in, check_out):
+                    raise serializers.ValidationError(
+                        {"room_id": "Room is not available for the selected dates."}
+                    )
+                booking = Booking.objects.create(
+                    user=guest_user,
+                    room=room,
+                    booking_kind=booking_kind,
+                    check_in_date=validated_data["check_in_date"],
+                    check_out_date=validated_data["check_out_date"],
+                    nights=nights,
+                    guest_count=validated_data.get("guest_count", 1),
+                    guest_name=guest_name,
+                    guest_phone=guest_phone,
+                    status=Booking.Status.PENDING,
+                    base_amount=base_amount,
+                    discount_amount=0,
+                    final_amount=base_amount,
+                    payment_status=Booking.PaymentStatus.UNPAID,
+                    notes=notes,
+                )
+            else:
+                hall = validated_data["function_hall"]
+                base_amount = hall.base_price_per_day * nights
+                hall = FunctionHall.objects.select_for_update().get(
+                    pk=hall.pk,
+                    is_deleted=False,
+                    is_active=True,
+                )
+                if not check_availability_with_lock(hall, check_in, check_out):
+                    raise serializers.ValidationError(
+                        {
+                            "function_hall_id": (
+                                "Function hall is not available for the selected dates."
+                            )
+                        }
+                    )
+                booking = Booking.objects.create(
+                    user=guest_user,
+                    function_hall=hall,
+                    booking_kind=booking_kind,
+                    check_in_date=validated_data["check_in_date"],
+                    check_out_date=validated_data["check_out_date"],
+                    nights=nights,
+                    guest_count=validated_data.get("guest_count", 1),
+                    guest_name=guest_name,
+                    guest_phone=guest_phone,
+                    status=Booking.Status.PENDING,
+                    base_amount=base_amount,
+                    discount_amount=0,
+                    final_amount=base_amount,
+                    payment_status=Booking.PaymentStatus.UNPAID,
+                    notes=notes,
+                )
 
             BookingStatusLog.objects.create(
                 booking=booking,

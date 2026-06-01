@@ -70,3 +70,24 @@ def filter_staff_room_queryset(
     if branch_id_param:
         return queryset.filter(branch_id=branch_id_param)
     return queryset
+
+
+def filter_staff_function_hall_queryset(
+    queryset: QuerySet,
+    user: User,
+    branch_id_param: str | None = None,
+) -> QuerySet:
+    """
+    Staff function hall list scope.
+
+    - Branch admin: always their assigned branch (ignores spoofed params).
+    - Super admin: optional ``branch_id`` query param; otherwise all branches.
+    """
+    assigned = staff_branch_id(user)
+    if user.role == "admin":
+        if not assigned:
+            return queryset.none()
+        return queryset.filter(branch_id=assigned)
+    if branch_id_param:
+        return queryset.filter(branch_id=branch_id_param)
+    return queryset

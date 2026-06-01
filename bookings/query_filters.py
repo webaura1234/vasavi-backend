@@ -18,6 +18,9 @@ PERIOD_DAYS: dict[str, int] = {
     "90d": 90,
 }
 
+# Staff/guest booking lists include future reservations (function halls are often booked ahead).
+LIST_PERIOD_LOOKAHEAD_DAYS = 365
+
 
 def _parse_iso_date(value: str | None) -> date | None:
     if not value:
@@ -49,6 +52,24 @@ def resolve_date_range(params: Any) -> tuple[date | None, date | None]:
     return None, None
 
 
+def resolve_list_date_range(params: Any) -> tuple[date | None, date | None]:
+    """
+    Date window for booking list/export queries.
+
+    Presets keep a backward-looking start (same as analytics) but extend the end
+    date into the future so upcoming room and function-hall reservations appear.
+    Custom ``date_from`` / ``date_to`` are respected as-is.
+    """
+    date_from, date_to = resolve_date_range(params)
+    period = (params.get("period") or "").strip().lower()
+    if period in PERIOD_DAYS:
+        today = timezone.localdate()
+        lookahead_end = today + timedelta(days=LIST_PERIOD_LOOKAHEAD_DAYS)
+        if date_to is None or date_to < lookahead_end:
+            date_to = lookahead_end
+    return date_from, date_to
+
+
 def resolve_chart_days(params: Any, *, default: int = 7) -> int:
     """Number of days for revenue chart buckets."""
     period = (params.get("period") or "").strip().lower()
@@ -70,7 +91,8 @@ def apply_booking_list_filters(qs: QuerySet, params: Any) -> QuerySet:
     elif status_param and status_param not in ("", "all"):
         qs = qs.filter(status=status_param)
 
-    date_from, date_to = resolve_date_range(params)
+    date_from, date_to = resolve_list_date_range(params)
+    # Stays overlapping [date_from, date_to]: check-in on/before end, check-out on/after start.
     if date_from:
         qs = qs.filter(check_out_date__gte=date_from)
     if date_to:
@@ -83,6 +105,7 @@ def apply_booking_list_filters(qs: QuerySet, params: Any) -> QuerySet:
             | Q(guest_phone__icontains=q)
             | Q(booking_reference__icontains=q)
             | Q(room__room_number__icontains=q)
+            | Q(function_hall__name__icontains=q)
         )
 
     payment_status = (params.get("payment_status") or "").strip()
@@ -98,6 +121,10 @@ def apply_booking_list_filters(qs: QuerySet, params: Any) -> QuerySet:
     booking_reference = (params.get("booking_reference") or "").strip()
     if booking_reference:
         qs = qs.filter(booking_reference__iexact=booking_reference)
+
+    booking_kind = (params.get("booking_kind") or "").strip().lower()
+    if booking_kind in ("room", "function_hall"):
+        qs = qs.filter(booking_kind=booking_kind)
 
     return qs
 
@@ -138,6 +165,10 @@ def apply_booking_export_filters(qs: QuerySet, params: Any) -> QuerySet:
     if guest_name:
         qs = qs.filter(guest_name__icontains=guest_name)
 
+    booking_kind = (params.get("booking_kind") or "").strip().lower()
+    if booking_kind in ("room", "function_hall"):
+        qs = qs.filter(booking_kind=booking_kind)
+
     return qs
 
 
@@ -170,13 +201,15 @@ def bookings_to_csv_rows(bookings: list[Booking]) -> list[list[str]]:
     rows: list[list[str]] = [header]
     for b in bookings:
         room_no = b.room.room_number if b.room_id else ""
+        hall_name = b.function_hall.name if b.function_hall_id else ""
+        resource_label = room_no or hall_name
         amount_rupees = round((b.final_amount or 0) / 100)
         rows.append(
             [
                 b.booking_reference,
                 b.guest_name or "",
                 b.guest_phone or "",
-                room_no,
+                resource_label,
                 b.check_in_date.isoformat(),
                 b.check_out_date.isoformat(),
                 b.status,

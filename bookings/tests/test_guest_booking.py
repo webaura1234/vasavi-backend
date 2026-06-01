@@ -10,7 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.models import User
 from bookings.models import Booking
 from branches.models import Branch
-from properties.models import Room, RoomType
+from properties.models import FunctionHall, Room, RoomType
 
 
 class GuestBookingFlowTests(TestCase):
@@ -110,3 +110,41 @@ class GuestBookingFlowTests(TestCase):
         results = response.json()["data"]["results"]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["status"], "pending")
+
+    def test_create_pending_hall_and_guest_confirm(self):
+        hall = FunctionHall.objects.create(
+            branch=self.branch,
+            name="Test Hall",
+            capacity=100,
+            base_price_per_day=40_000_00,
+            operational_status="available",
+        )
+        create = self.client.post(
+            "/api/v1/bookings/",
+            {
+                "function_hall_id": str(hall.pk),
+                "check_in_date": (self.today + timedelta(days=7)).isoformat(),
+                "check_out_date": (self.today + timedelta(days=9)).isoformat(),
+                "guest_count": 50,
+            },
+            format="json",
+            HTTP_X_IDEMPOTENCY_KEY="test-hall-create-1",
+        )
+        self.assertEqual(create.status_code, 201, create.content)
+        data = create.json()["data"]
+        self.assertEqual(data["booking_kind"], "function_hall")
+
+        booking_id = data["id"]
+        confirm = self.client.post(
+            f"/api/v1/bookings/{booking_id}/confirm/",
+            {},
+            format="json",
+            HTTP_X_IDEMPOTENCY_KEY="test-hall-confirm-1",
+        )
+        self.assertEqual(confirm.status_code, 200, confirm.content)
+        confirmed = confirm.json()["data"]
+        self.assertEqual(confirmed["status"], "confirmed")
+
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertEqual(booking.function_hall_id, hall.pk)
+        self.assertEqual(booking.base_amount, 40_000_00 * 2)

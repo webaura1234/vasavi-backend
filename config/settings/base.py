@@ -310,6 +310,9 @@ STORAGES = {
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+# Subdirectories under MEDIA_ROOT for local uploads (swap storage backend later).
+MEDIA_ROOMS_DIR = "rooms"
+MEDIA_FUNCTION_HALLS_DIR = "function_halls"
 
 # ---------------------------------------------------------------------------
 # Security defaults (tightened in production)

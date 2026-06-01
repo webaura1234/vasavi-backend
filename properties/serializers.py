@@ -7,8 +7,22 @@ from datetime import date
 from rest_framework import serializers
 
 from branches.serializers import BranchSerializer
-from properties.models import Room, RoomType
+from properties.image_utils import absolute_media_url
+from properties.models import Room, RoomImage, RoomType
 from utils.money import paise_to_rupees_display
+
+
+class RoomImagePublicSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(read_only=True)
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RoomImage
+        fields = ("id", "url", "caption", "is_primary", "sort_order")
+        read_only_fields = fields
+
+    def get_url(self, obj: RoomImage) -> str | None:
+        return absolute_media_url(self.context.get("request"), obj.image)
 
 
 class RoomTypeSerializer(serializers.ModelSerializer):
@@ -25,6 +39,7 @@ class RoomSerializer(serializers.ModelSerializer):
     branch = BranchSerializer(read_only=True)
     room_type = RoomTypeSerializer(read_only=True)
     base_price_display = serializers.SerializerMethodField()
+    images = RoomImagePublicSerializer(many=True, read_only=True)
 
     class Meta:
         model = Room
@@ -38,6 +53,7 @@ class RoomSerializer(serializers.ModelSerializer):
             "base_price_display",
             "is_donor_exclusive",
             "is_active",
+            "images",
         )
         read_only_fields = ("id",)
 

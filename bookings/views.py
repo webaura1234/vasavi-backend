@@ -37,7 +37,12 @@ logger = logging.getLogger("vasavi.bookings.views")
 def _booking_queryset_for_user(user):
     """Scope bookings by role — branch admin uses AdminBranch FK, not query params."""
     qs = Booking.objects.filter(is_deleted=False).select_related(
-        "user", "room", "room__room_type", "branch"
+        "user",
+        "room",
+        "room__room_type",
+        "function_hall",
+        "function_hall__branch",
+        "branch",
     ).prefetch_related("coupons_applied")
     if user.role in ("user", "donor"):
         return qs.filter(user=user)

@@ -45,7 +45,9 @@ class IsSuperAdmin(BasePermission):
 
 
 class IsBranchAdmin(BasePermission):
-    """Branch admin with an assigned branch."""
+    """Branch admin with an assigned branch."""  # UNUSED — scoping uses branch_scope helpers
+
+    # UNUSED — branch scoping is handled via queryset helpers instead.
 
     def has_permission(self, request, view) -> bool:
         user = request.user
@@ -70,7 +72,7 @@ class IsBranchAdmin(BasePermission):
 
 
 class IsOwnerOrAdminAbove(BasePermission):
-    """Object belongs to the request user, or caller is admin/super_admin."""
+    """Object belongs to the request user, or caller is admin/super_admin."""  # UNUSED
 
     def has_object_permission(self, request, view, obj) -> bool:
         user = request.user

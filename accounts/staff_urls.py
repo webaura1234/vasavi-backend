@@ -37,6 +37,14 @@ from properties.staff_views import (
     StaffRoomOperationalStatusView,
     StaffRoomSearchView,
 )
+from properties.function_hall_staff_views import (
+    StaffFunctionHallDetailUpdateView,
+    StaffFunctionHallImageDeleteView,
+    StaffFunctionHallImageUploadView,
+    StaffFunctionHallListCreateView,
+    StaffFunctionHallOperationalStatusView,
+    StaffFunctionHallSearchView,
+)
 
 app_name = "staff"
 
@@ -126,5 +134,35 @@ urlpatterns = [
         "rooms/<uuid:pk>/images/<uuid:image_id>/",
         StaffRoomImageDeleteView.as_view(),
         name="staff-room-image-delete",
+    ),
+    path(
+        "function-halls/",
+        StaffFunctionHallListCreateView.as_view(),
+        name="staff-function-hall-list",
+    ),
+    path(
+        "function-halls/search/",
+        StaffFunctionHallSearchView.as_view(),
+        name="staff-function-hall-search",
+    ),
+    path(
+        "function-halls/<uuid:pk>/",
+        StaffFunctionHallDetailUpdateView.as_view(),
+        name="staff-function-hall-detail",
+    ),
+    path(
+        "function-halls/<uuid:pk>/operational-status/",
+        StaffFunctionHallOperationalStatusView.as_view(),
+        name="staff-function-hall-status",
+    ),
+    path(
+        "function-halls/<uuid:pk>/images/",
+        StaffFunctionHallImageUploadView.as_view(),
+        name="staff-function-hall-images",
+    ),
+    path(
+        "function-halls/<uuid:pk>/images/<uuid:image_pk>/",
+        StaffFunctionHallImageDeleteView.as_view(),
+        name="staff-function-hall-image-delete",
     ),
 ]

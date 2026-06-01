@@ -145,8 +145,12 @@ def _build_revenue_chart(
 
 def _occupancy_stats(bookings_qs, rooms_qs) -> dict:
     total_rooms = rooms_qs.count()
+    room_bookings_qs = bookings_qs.filter(
+        booking_kind=Booking.BookingKind.ROOM,
+        room_id__isnull=False,
+    )
     occupied_rooms = (
-        bookings_qs.filter(status=Booking.Status.CHECKED_IN)
+        room_bookings_qs.filter(status=Booking.Status.CHECKED_IN)
         .values("room_id")
         .distinct()
         .count()

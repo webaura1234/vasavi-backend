@@ -6,6 +6,7 @@ from rest_framework import serializers
 
 from accounts.models import AdminBranch
 from branches.models import Branch
+from properties.image_utils import absolute_media_url
 from properties.models import Room, RoomImage, RoomType
 
 
@@ -28,12 +29,7 @@ class RoomImageSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_url(self, obj: RoomImage) -> str | None:
-        if not obj.image:
-            return None
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-        return obj.image.url
+        return absolute_media_url(self.context.get("request"), obj.image)
 
 
 class StaffRoomSerializer(serializers.ModelSerializer):

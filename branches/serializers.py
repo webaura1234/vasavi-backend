@@ -88,3 +88,20 @@ class AssignAdminSerializer(serializers.Serializer):
         attrs["user"] = user
         attrs["branch"] = branch
         return attrs
+
+
+class RevokeAdminSerializer(serializers.Serializer):
+    user_id = serializers.UUIDField()
+
+    def validate_user_id(self, value):
+        try:
+            user = User.objects.get(pk=value, is_deleted=False)
+        except User.DoesNotExist as exc:
+            raise serializers.ValidationError("User not found.") from exc
+
+        if user.role != "admin":
+            raise serializers.ValidationError(
+                "Only branch admin accounts can be revoked from a branch."
+            )
+
+        return user
