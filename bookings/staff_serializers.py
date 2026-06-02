@@ -11,7 +11,11 @@ from rest_framework import serializers
 from accounts.models import AdminBranch, User
 from bookings.models import Booking, BookingStatusLog
 from bookings.services.availability import check_availability_with_lock
+from bookings.services.guest_confirm import redeem_coupons_on_booking
 from bookings.services.payments import confirm_cash_payment
+from bookings.services.pricing import compute_coupon_discount
+from bookings.services.guest_count import resolve_guest_count
+from bookings.services.staff_guest import validate_coupons_for_guest
 from properties.models import FunctionHall, Room
 from utils.phone import is_valid_indian_phone, normalize_indian_phone
 
@@ -21,7 +25,9 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
     function_hall_id = serializers.UUIDField(required=False)
     check_in_date = serializers.DateField()
     check_out_date = serializers.DateField()
-    guest_count = serializers.IntegerField(default=1, min_value=1)
+    guest_count = serializers.IntegerField(required=False, min_value=1)
+    adults = serializers.IntegerField(required=False, min_value=1)
+    children = serializers.IntegerField(required=False, min_value=0, default=0)
     guest_name = serializers.CharField(max_length=200)
     guest_phone = serializers.CharField(max_length=15)
     notes = serializers.CharField(required=False, allow_blank=True, default="")
@@ -31,6 +37,12 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
     )
     record_cash_payment = serializers.BooleanField(default=False)
     check_in_immediately = serializers.BooleanField(default=False)
+    coupon_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        allow_empty=True,
+        default=list,
+    )
 
     def validate_guest_phone(self, value: str) -> str:
         if not is_valid_indian_phone(value):
@@ -68,7 +80,7 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
             )
 
         staff = self.context["request"].user
-        guest_count = attrs.get("guest_count", 1)
+        guest_count = resolve_guest_count(attrs)
 
         def _enforce_branch_scope(resource_branch_id):
             if staff.role != "admin":
@@ -145,6 +157,29 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
             attrs["function_hall"] = hall
             attrs["booking_kind"] = Booking.BookingKind.FUNCTION_HALL
 
+        coupon_ids = attrs.get("coupon_ids") or []
+        if coupon_ids:
+            guest_user = User.objects.filter(
+                phone=attrs["guest_phone"],
+                is_deleted=False,
+            ).first()
+            if not guest_user:
+                raise serializers.ValidationError(
+                    {
+                        "coupon_ids": (
+                            "Guest must already be registered as a donor before "
+                            "applying coupons."
+                        )
+                    }
+                )
+            attrs["coupons"] = validate_coupons_for_guest(
+                coupon_ids,
+                guest_user,
+                room_booking=attrs["booking_kind"] == Booking.BookingKind.ROOM,
+            )
+        else:
+            attrs["coupons"] = []
+
         return attrs
 
     def _resolve_guest_user(self, phone: str, name: str) -> User:
@@ -194,6 +229,7 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
         )
 
         guest_user = self._resolve_guest_user(guest_phone, guest_name)
+        coupons = validated_data.get("coupons") or []
 
         with transaction.atomic():
             if booking_kind == Booking.BookingKind.ROOM:
@@ -266,6 +302,21 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
                 changed_by=staff,
                 reason="Manual booking created by staff",
             )
+
+            if coupons:
+                discount_amount, final_amount = compute_coupon_discount(
+                    booking.base_amount, coupons
+                )
+                booking.discount_amount = discount_amount
+                booking.final_amount = final_amount
+                booking.save(
+                    update_fields=[
+                        "discount_amount",
+                        "final_amount",
+                        "updated_at",
+                    ]
+                )
+                redeem_coupons_on_booking(booking, coupons, changed_by=staff)
 
             if record_cash and booking.final_amount > 0:
                 booking = confirm_cash_payment(

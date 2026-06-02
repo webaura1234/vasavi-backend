@@ -132,10 +132,19 @@ class CouponSerializer(serializers.ModelSerializer):
         return None
 
 
+class CouponStatsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    issued = serializers.IntegerField()
+    dispatched = serializers.IntegerField()
+    available = serializers.IntegerField()
+    used = serializers.IntegerField()
+
+
 class CouponWalletSerializer(serializers.Serializer):
+    stats = CouponStatsSerializer()
     available = CouponSerializer(many=True)
     used = CouponSerializer(many=True)
-    dispatched = CouponSerializer(many=True)
+    issued = CouponSerializer(many=True)
 
 
 class CouponDispatchSerializer(serializers.Serializer):

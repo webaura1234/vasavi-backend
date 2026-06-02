@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics
 from rest_framework.views import APIView
@@ -15,8 +15,14 @@ from coupons.serializers import (
     CouponDispatchSerializer,
     CouponRedeemSerializer,
     CouponSerializer,
-    CouponWalletSerializer,
+    CouponStatsSerializer,
 )
+from coupons.services.stats import (
+    compute_coupon_stats,
+    coupons_for_donor_profile,
+    coupons_redeemable_for_user,
+)
+from donors.models import DonorProfile
 from permissions import IsAdminOrAbove, IsDonorOrAbove, IsSuperAdmin
 from rest_framework.permissions import IsAuthenticated
 from utils.responses import error_response, paginated_response, success_response
@@ -89,25 +95,67 @@ class DonorCouponWalletView(APIView):
 
     def get(self, request):
         user = request.user
-        base = (
-            Coupon.objects.filter(is_deleted=False)
-            .annotate(assigned_count=Count("assigned_donors"))
-            .filter(Q(assigned_count=0) | Q(assigned_donors=user))
-            .select_related("batch", "redeemed_by", "redeemed_at_booking")
-            .prefetch_related("assigned_donors")
-            .distinct()
-        )
+        try:
+            profile = user.donor_profile
+        except DonorProfile.DoesNotExist:
+            stats = compute_coupon_stats(user=user)
+            return success_response(
+                {
+                    "stats": CouponStatsSerializer(stats).data,
+                    "available": [],
+                    "used": [],
+                    "issued": [],
+                }
+            )
 
-        available = base.filter(status=Coupon.Status.DISPATCHED)
-        used = base.filter(status=Coupon.Status.REDEEMED, redeemed_by=user)
-        dispatched = base.filter(status=Coupon.Status.DISPATCHED)
+        profile_qs = coupons_for_donor_profile(profile).select_related(
+            "batch", "redeemed_by", "redeemed_at_booking"
+        ).prefetch_related("assigned_donors")
+
+        redeemable_ids = coupons_redeemable_for_user(user).values_list("pk", flat=True)
+        available = profile_qs.filter(
+            status=Coupon.Status.DISPATCHED,
+            pk__in=redeemable_ids,
+        )
+        used = profile_qs.filter(
+            status=Coupon.Status.REDEEMED,
+            redeemed_by=user,
+        )
+        issued = profile_qs.filter(status=Coupon.Status.ISSUED)
+        stats = compute_coupon_stats(donor_profile=profile, user=user)
 
         payload = {
+            "stats": CouponStatsSerializer(stats).data,
             "available": CouponSerializer(available, many=True).data,
             "used": CouponSerializer(used, many=True).data,
-            "dispatched": CouponSerializer(dispatched, many=True).data,
+            "issued": CouponSerializer(issued, many=True).data,
         }
         return success_response(payload)
+
+
+class DonorCouponStatsView(APIView):
+    """Coupon totals for a donor profile (super admin / branch admin)."""
+
+    permission_classes = [IsAdminOrAbove]
+
+    def get(self, request):
+        donor_profile_id = request.query_params.get("donor_profile_id")
+        if not donor_profile_id:
+            return error_response(
+                "VALIDATION_ERROR",
+                "donor_profile_id query parameter is required.",
+                status=400,
+            )
+        try:
+            profile = DonorProfile.objects.select_related("user").get(
+                pk=donor_profile_id,
+                is_deleted=False,
+            )
+        except DonorProfile.DoesNotExist:
+            return error_response("NOT_FOUND", "Donor profile not found.", status=404)
+
+        stats = compute_coupon_stats(donor_profile=profile, user=profile.user)
+        return success_response(CouponStatsSerializer(stats).data)
 
 
 class CouponDispatchView(APIView):

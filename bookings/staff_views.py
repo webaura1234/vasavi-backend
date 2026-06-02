@@ -15,12 +15,31 @@ from rest_framework.views import APIView
 from bookings.models import Booking, BookingStatusLog
 from bookings.query_filters import apply_booking_list_filters, bookings_to_csv_rows
 from bookings.serializers import BookingSerializer
+from bookings.services.staff_guest import lookup_guest_by_phone
 from bookings.staff_serializers import StaffManualBookingCreateSerializer
 from bookings.views import _booking_queryset_for_user
 from permissions import IsAdminOrAbove
+from utils.phone import is_valid_indian_phone, normalize_indian_phone
 from utils.responses import error_response, success_response
 
 logger = logging.getLogger("vasavi.bookings.staff_views")
+
+
+class StaffGuestLookupView(APIView):
+    """Look up a guest or donor by phone for manual booking."""
+
+    permission_classes = [IsAdminOrAbove]
+
+    def get(self, request):
+        raw = (request.query_params.get("phone") or "").strip()
+        if not is_valid_indian_phone(raw):
+            return error_response(
+                "VALIDATION_ERROR",
+                "Enter a valid 10-digit Indian mobile number.",
+                status=400,
+            )
+        phone = normalize_indian_phone(raw)
+        return success_response(lookup_guest_by_phone(phone))
 
 
 class StaffManualBookingCreateView(APIView):

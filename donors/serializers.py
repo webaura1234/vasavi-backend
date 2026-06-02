@@ -6,14 +6,14 @@ import random
 import string
 
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import ProfileConfirmation, User
 from accounts.serializers import UserProfileSerializer
 from branches.serializers import BranchSerializer
-from coupons.models import Coupon
+from coupons.services.stats import compute_coupon_stats
 from donors.models import (
     Donation,
     DonationPurpose,
@@ -148,6 +148,10 @@ class DonorProfileSerializer(serializers.ModelSerializer):
     total_donated_display = serializers.SerializerMethodField()
     available_coupons_count = serializers.SerializerMethodField()
     used_coupons_count = serializers.SerializerMethodField()
+    total_coupons_count = serializers.SerializerMethodField()
+    issued_coupons_count = serializers.SerializerMethodField()
+    dispatched_coupons_count = serializers.SerializerMethodField()
+    coupon_stats = serializers.SerializerMethodField()
     date_joined = serializers.DateTimeField(source="user.date_joined", read_only=True)
 
     class Meta:
@@ -164,8 +168,12 @@ class DonorProfileSerializer(serializers.ModelSerializer):
             "for_place",
             "total_donated_paise",
             "total_donated_display",
+            "total_coupons_count",
+            "issued_coupons_count",
+            "dispatched_coupons_count",
             "available_coupons_count",
             "used_coupons_count",
+            "coupon_stats",
             "date_joined",
         )
         read_only_fields = fields
@@ -177,25 +185,30 @@ class DonorProfileSerializer(serializers.ModelSerializer):
     def get_total_donated_display(self, obj: DonorProfile) -> str:
         return paise_to_rupees_display(self.get_total_donated_paise(obj))
 
+    def _coupon_stats(self, obj: DonorProfile) -> dict[str, int]:
+        cached = getattr(obj, "_coupon_stats_cache", None)
+        if cached is None:
+            cached = compute_coupon_stats(donor_profile=obj, user=obj.user)
+            obj._coupon_stats_cache = cached
+        return cached
+
+    def get_coupon_stats(self, obj: DonorProfile) -> dict[str, int]:
+        return self._coupon_stats(obj)
+
+    def get_total_coupons_count(self, obj: DonorProfile) -> int:
+        return self._coupon_stats(obj)["total"]
+
+    def get_issued_coupons_count(self, obj: DonorProfile) -> int:
+        return self._coupon_stats(obj)["issued"]
+
+    def get_dispatched_coupons_count(self, obj: DonorProfile) -> int:
+        return self._coupon_stats(obj)["dispatched"]
+
     def get_available_coupons_count(self, obj: DonorProfile) -> int:
-        user = obj.user
-        return (
-            Coupon.objects.filter(
-                status=Coupon.Status.DISPATCHED,
-                is_deleted=False,
-            )
-            .annotate(assigned_count=Count("assigned_donors"))
-            .filter(Q(assigned_count=0) | Q(assigned_donors=user))
-            .distinct()
-            .count()
-        )
+        return self._coupon_stats(obj)["available"]
 
     def get_used_coupons_count(self, obj: DonorProfile) -> int:
-        return Coupon.objects.filter(
-            redeemed_by=obj.user,
-            status=Coupon.Status.REDEEMED,
-            is_deleted=False,
-        ).count()
+        return self._coupon_stats(obj)["used"]
 
 
 def _generate_donor_id() -> str:
@@ -316,6 +329,9 @@ class DonorListSerializer(serializers.ModelSerializer):
     city = serializers.SerializerMethodField()
     total_donated_paise = serializers.IntegerField(read_only=True)
     total_donated_display = serializers.SerializerMethodField()
+    total_coupons_count = serializers.SerializerMethodField()
+    available_coupons_count = serializers.SerializerMethodField()
+    used_coupons_count = serializers.SerializerMethodField()
 
     class Meta:
         model = DonorProfile
@@ -329,6 +345,9 @@ class DonorListSerializer(serializers.ModelSerializer):
             "city",
             "total_donated_paise",
             "total_donated_display",
+            "total_coupons_count",
+            "available_coupons_count",
+            "used_coupons_count",
             "date_joined",
         )
         read_only_fields = fields
@@ -339,6 +358,22 @@ class DonorListSerializer(serializers.ModelSerializer):
     def get_total_donated_display(self, obj: DonorProfile) -> str:
         total = getattr(obj, "total_donated_paise", None) or 0
         return paise_to_rupees_display(int(total))
+
+    def _coupon_stats(self, obj: DonorProfile) -> dict[str, int]:
+        cached = getattr(obj, "_coupon_stats_cache", None)
+        if cached is None:
+            cached = compute_coupon_stats(donor_profile=obj, user=obj.user)
+            obj._coupon_stats_cache = cached
+        return cached
+
+    def get_total_coupons_count(self, obj: DonorProfile) -> int:
+        return self._coupon_stats(obj)["total"]
+
+    def get_available_coupons_count(self, obj: DonorProfile) -> int:
+        return self._coupon_stats(obj)["available"]
+
+    def get_used_coupons_count(self, obj: DonorProfile) -> int:
+        return self._coupon_stats(obj)["used"]
 
     date_joined = serializers.DateTimeField(source="user.date_joined", read_only=True)
 
@@ -384,6 +419,51 @@ class DonorUpdateSerializer(serializers.Serializer):
 
         instance.save()
         return instance
+
+
+class StaffDonorCouponSerializer(serializers.ModelSerializer):
+    """Read-only donor row for branch admin coupon tracking."""
+
+    id = serializers.UUIDField(read_only=True)
+    phone = serializers.CharField(source="user.phone", read_only=True)
+    name = serializers.CharField(source="user.name", read_only=True)
+    tier = serializers.CharField(source="membership_tier.name", read_only=True)
+    city = serializers.SerializerMethodField()
+    total_donated_display = serializers.SerializerMethodField()
+    coupon_stats = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DonorProfile
+        fields = (
+            "id",
+            "donor_id",
+            "name",
+            "phone",
+            "tier",
+            "club_name",
+            "city",
+            "total_donated_display",
+            "coupon_stats",
+        )
+        read_only_fields = fields
+
+    def get_city(self, obj: DonorProfile) -> str:
+        return obj.for_place.city if obj.for_place else ""
+
+    def get_total_donated_display(self, obj: DonorProfile) -> str:
+        total = getattr(obj, "total_donated_paise", None) or 0
+        return paise_to_rupees_display(int(total))
+
+    def get_coupon_stats(self, obj: DonorProfile) -> dict[str, int]:
+        cached = getattr(obj, "_coupon_stats_cache", None)
+        if cached is None:
+            cached = compute_coupon_stats(donor_profile=obj, user=obj.user)
+            obj._coupon_stats_cache = cached
+        return {
+            "issued": cached["issued"],
+            "available": cached["available"],
+            "used": cached["used"],
+        }
 
 
 class PublicDonorSerializer(serializers.ModelSerializer):

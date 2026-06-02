@@ -14,6 +14,7 @@ from bookings.models import Booking, BookingStatusLog
 from bookings.services.availability import (
     check_availability_with_lock,
 )
+from bookings.services.guest_count import resolve_guest_count
 from bookings.services.pricing import compute_coupon_discount
 from branches.serializers import BranchSerializer
 from coupons.models import Coupon
@@ -102,7 +103,9 @@ class BookingCreateSerializer(serializers.Serializer):
     function_hall_id = serializers.UUIDField(required=False)
     check_in_date = serializers.DateField()
     check_out_date = serializers.DateField()
-    guest_count = serializers.IntegerField(default=1, min_value=1)
+    guest_count = serializers.IntegerField(required=False, min_value=1)
+    adults = serializers.IntegerField(required=False, min_value=1)
+    children = serializers.IntegerField(required=False, min_value=0, default=0)
     guest_name = serializers.CharField(required=False, allow_blank=True)
     guest_phone = serializers.CharField(required=False, allow_blank=True)
     coupon_ids = serializers.ListField(
@@ -144,7 +147,7 @@ class BookingCreateSerializer(serializers.Serializer):
 
         attrs = self._validate_dates(attrs)
         request = self.context["request"]
-        guest_count = attrs.get("guest_count", 1)
+        guest_count = resolve_guest_count(attrs)
 
         if has_room:
             try:

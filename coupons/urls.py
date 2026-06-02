@@ -7,6 +7,7 @@ from coupons.views import (
     CouponDispatchView,
     CouponListView,
     CouponRedeemView,
+    DonorCouponStatsView,
     DonorCouponWalletView,
     ExportCouponsExcelView,
 )
@@ -18,6 +19,7 @@ urlpatterns = [
     path("export/", ExportCouponsExcelView.as_view(), name="coupon-export"),
     path("", CouponListView.as_view(), name="coupon-list"),
     path("wallet/", DonorCouponWalletView.as_view(), name="coupon-wallet"),
+    path("stats/", DonorCouponStatsView.as_view(), name="coupon-stats"),
     path("dispatch/", CouponDispatchView.as_view(), name="coupon-dispatch"),
     path("redeem/", CouponRedeemView.as_view(), name="coupon-redeem"),
 ]

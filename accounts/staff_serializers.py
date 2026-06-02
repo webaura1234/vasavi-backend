@@ -82,6 +82,7 @@ ADMIN_PERMISSIONS = [
     "bookings.update_status",
     "bookings.cancel",
     "checkin.manage",
+    "coupons.view",
     "donors.verify",
     "extensions.view",
     "extensions.manage",

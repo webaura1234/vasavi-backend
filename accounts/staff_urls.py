@@ -22,9 +22,11 @@ from bookings.staff_views import (
     StaffBookingExportStatusView,
     StaffBookingExportCountView,
     StaffBookingRefundView,
+    StaffGuestLookupView,
     StaffManualBookingCreateView,
     StaffRefundApprovalView,
 )
+from donors.staff_views import StaffDonorCouponListView
 from support.staff_views import (
     StaffSupportTicketListCreateView,
     StaffSupportTicketStatusView,
@@ -56,6 +58,11 @@ urlpatterns = [
     path("me/", StaffMeView.as_view(), name="staff-me"),
     path("admins/", StaffManagementView.as_view(), name="staff-admins"),
     path(
+        "donors/coupons/",
+        StaffDonorCouponListView.as_view(),
+        name="staff-donor-coupons",
+    ),
+    path(
         "analytics/dashboard/",
         StaffDashboardAnalyticsView.as_view(),
         name="staff-analytics-dashboard",
@@ -79,6 +86,11 @@ urlpatterns = [
         "analytics/donors/",
         StaffDonorAnalyticsView.as_view(),
         name="staff-analytics-donors",
+    ),
+    path(
+        "guests/lookup/",
+        StaffGuestLookupView.as_view(),
+        name="staff-guest-lookup",
     ),
     path("bookings/", StaffManualBookingCreateView.as_view(), name="staff-bookings-create"),
     path(
