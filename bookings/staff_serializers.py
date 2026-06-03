@@ -380,4 +380,8 @@ class StaffManualBookingCreateSerializer(serializers.Serializer):
                     reason="Checked in at front desk",
                 )
 
+        from notifications.services.staff import schedule_staff_new_booking_notification
+
+        schedule_staff_new_booking_notification(booking.pk, exclude_user_id=staff.pk)
+
         return booking

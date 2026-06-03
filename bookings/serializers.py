@@ -359,6 +359,10 @@ class BookingCreateSerializer(serializers.Serializer):
                 reason="Pending reservation created (guest checkout in progress)",
             )
 
+        from notifications.services.staff import schedule_staff_new_booking_notification
+
+        schedule_staff_new_booking_notification(booking.pk)
+
         return booking
 
 

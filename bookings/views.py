@@ -236,6 +236,14 @@ class BookingExtendStayView(APIView):
                 ),
             )
 
+        from notifications.services.staff import schedule_staff_stay_extended_notification
+
+        schedule_staff_stay_extended_notification(
+            booking.pk,
+            old_check_out=old_check_out,
+            changed_by_id=request.user.pk,
+        )
+
         booking.refresh_from_db()
         return success_response(BookingSerializer(booking).data)
 

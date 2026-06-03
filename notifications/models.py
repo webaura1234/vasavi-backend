@@ -14,6 +14,7 @@ class Notification(TimeStampedModel):
         DONATION = "donation", "Donation"
         USER = "user", "User"
         SYSTEM = "system", "System"
+        BOOKING = "booking", "Booking"
 
     class Type(models.TextChoices):
         COUPON_REDEEMED = "coupon_redeemed", "Coupon redeemed"
@@ -26,6 +27,10 @@ class Notification(TimeStampedModel):
         PASSWORD_CHANGED = "password_changed", "Password changed"
         ACCOUNT_APPROVED = "account_approved", "Account approved"
         SYSTEM_ALERT = "system_alert", "System alert"
+        NEW_BOOKING = "new_booking", "New booking"
+        PAYMENT_PENDING = "payment_pending", "Payment pending"
+        STAY_EXTENDED = "stay_extended", "Stay extended"
+        BOOKING_STATUS_CHANGED = "booking_status_changed", "Booking status changed"
 
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL,
