@@ -225,6 +225,10 @@ class BookingCreateSerializer(serializers.Serializer):
 
         # --- Coupon validations ---------------------------------------------
         coupon_ids = attrs.get("coupon_ids") or []
+        if coupon_ids and request.user.role not in ("donor", "admin", "super_admin"):
+            raise serializers.ValidationError(
+                {"coupon_ids": "Coupons can only be applied by donors."}
+            )
         if len(coupon_ids) > 2:
             raise serializers.ValidationError(
                 {"coupon_ids": "Maximum two coupons allowed per booking."}
@@ -239,15 +243,14 @@ class BookingCreateSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {"coupon_ids": f"Coupon {coupon_id} not found."}
                 ) from exc
-            if coupon.status != Coupon.Status.DISPATCHED:
-                raise serializers.ValidationError(
-                    {"coupon_ids": f"Coupon {coupon.serial_number} is not dispatched."}
-                )
-            if coupon.assigned_donors.exists() and not coupon.assigned_donors.filter(
-                pk=request.user.pk
-            ).exists():
+            has_assigned = coupon.assigned_donors.exists()
+            if has_assigned and not coupon.assigned_donors.filter(pk=request.user.pk).exists():
                 raise serializers.ValidationError(
                     {"coupon_ids": f"Coupon {coupon.serial_number} is not assigned to you."}
+                )
+            if not has_assigned and request.user.role != "donor":
+                raise serializers.ValidationError(
+                    {"coupon_ids": f"Coupon {coupon.serial_number} is only available to donors."}
                 )
             if coupon.coupon_type in types_seen:
                 raise serializers.ValidationError(
@@ -577,8 +580,17 @@ class BookingExtendStaySerializer(serializers.Serializer):
             )
 
         # --- Overlap check: ensure no booking conflicts with the extension ---
+        if booking.room:
+            overlap_filter = {"room": booking.room}
+        elif booking.function_hall:
+            overlap_filter = {"function_hall": booking.function_hall}
+        else:
+            raise serializers.ValidationError(
+                {"check_out_date": "Booking has no associated room or function hall."}
+            )
+
         overlap_exists = Booking.objects.filter(
-            room=booking.room,
+            **overlap_filter,
             status__in=[
                 Booking.Status.PENDING,
                 Booking.Status.CONFIRMED,

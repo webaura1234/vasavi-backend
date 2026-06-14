@@ -19,6 +19,10 @@ requests>=2.32.0
 # Celery & broker
 celery[redis]>=5.4.0
 redis>=5.0.0
+django-celery-beat>=2.6.0   # DB-backed Beat scheduler — safe for multi-process deploys
+
+# Error tracking
+sentry-sdk[django,celery]>=2.0.0
 
 # Payments
 razorpay>=1.4.2

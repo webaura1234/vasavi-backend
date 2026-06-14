@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import logging
-import random
+import secrets
 import string
 
 from django.conf import settings
@@ -60,7 +60,7 @@ def _access_expires_in_seconds() -> int:
 
 
 def _generate_otp_code() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    return "".join(secrets.choice(string.digits) for _ in range(6))
 
 
 def _phone_suffix(phone: str) -> str:
@@ -74,7 +74,7 @@ def _set_staff_refresh_cookie(response, refresh_token: str) -> None:
         refresh_token,
         max_age=30 * 24 * 3600,
         httponly=True,
-        secure=getattr(settings, "SESSION_COOKIE_SECURE", False),
+        secure=getattr(settings, "REFRESH_COOKIE_SECURE", not settings.DEBUG),
         samesite="Lax",
         path=STAFF_COOKIE_PATH,
     )
@@ -149,13 +149,7 @@ class StaffOTPVerifyView(APIView):
         phone = serializer.validated_data["phone"]
         otp = serializer.validated_data["otp"]
 
-        log = (
-            OTPLog.objects.filter(phone=phone, is_verified=False)
-            .order_by("-created_at")
-            .first()
-        )
-
-        result = OTPLog.verify(phone, otp)
+        result, log = OTPLog.verify(phone, otp)
 
         if result == "locked":
             locked_until = log.locked_until if log else None

@@ -55,6 +55,13 @@ class SupportTicket(SoftDeleteModel, TimeStampedModel):
         ordering = ["-created_at"]
         verbose_name = "support ticket"
         verbose_name_plural = "support tickets"
+        indexes = [
+            # Staff portal filters tickets by branch + status frequently.
+            models.Index(
+                fields=["branch", "status"],
+                name="idx_ticket_branch_status",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.subject[:50]} ({self.get_status_display()})"
@@ -87,6 +94,3 @@ class ContactInquiry(TimeStampedModel):
         ordering = ["-created_at"]
         verbose_name = "contact inquiry"
         verbose_name_plural = "contact inquiries"
-
-    def __str__(self) -> str:
-        return f"Contact from {self.name} <{self.email}>"

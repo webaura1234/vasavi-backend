@@ -157,7 +157,7 @@ class StaffBookingRefundView(APIView):
             request.user.phone,
         )
 
-        booking.refresh_from_db()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
         return success_response(BookingSerializer(booking).data)
 
 
@@ -220,7 +220,7 @@ class StaffRefundApprovalView(APIView):
                     changed_by=request.user,
                     reason=f"Refund request rejected: {reason}",
                 )
-            booking.refresh_from_db()
+            booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
             return success_response(BookingSerializer(booking).data)
 
         # Approve → delegate to StaffBookingRefundView logic

@@ -319,6 +319,12 @@ class OTPLog(TimeStampedModel):
                 fields=["phone", "created_at"],
                 name="idx_otp_phone_created",
             ),
+            # Covers OTPLog.can_send (phone + is_verified=False + created_at__gte)
+            # and OTPLog.verify (phone + is_verified=False lookups).
+            models.Index(
+                fields=["phone", "is_verified", "created_at"],
+                name="idx_otp_phone_verified_created",
+            ),
         ]
 
     # ---- lifecycle ---------------------------------------------------------
@@ -356,7 +362,7 @@ class OTPLog(TimeStampedModel):
         return recent_count < 5
 
     @classmethod
-    def verify(cls, phone: str, raw_otp: str) -> str:
+    def verify(cls, phone: str, raw_otp: str) -> tuple[str, "OTPLog | None"]:
         """
         Attempt to verify the most recent pending OTP for *phone*.
 
@@ -369,41 +375,48 @@ class OTPLog(TimeStampedModel):
 
         Returns
         -------
-        str
-            One of ``'success'``, ``'invalid'``, ``'expired'``, or
-            ``'locked'``.
+        tuple[str, OTPLog | None]
+            A two-element tuple: the first element is one of
+            ``'success'``, ``'invalid'``, ``'expired'``, or
+            ``'locked'``; the second is the :class:`OTPLog` instance
+            (or ``None`` when no matching record exists).
         """
-        log = (
-            cls.objects.filter(phone=phone, is_verified=False)
-            .order_by("-created_at")
-            .first()
-        )
+        from django.db import transaction
 
-        if log is None:
-            return "invalid"
+        with transaction.atomic():
+            log = (
+                cls.objects.select_for_update()
+                .filter(phone=phone, is_verified=False)
+                .order_by("-created_at")
+                .first()
+            )
 
-        now = timezone.now()
+            if log is None:
+                return "invalid", None
 
-        # Locked-out after too many failed attempts
-        if log.locked_until and now < log.locked_until:
-            return "locked"
+            now = timezone.now()
 
-        # OTP has expired
-        if now > log.expires_at:
-            return "expired"
+            # Locked-out after too many failed attempts
+            if log.locked_until and now < log.locked_until:
+                return "locked", log
 
-        # Verify the hash
-        if not check_password(raw_otp, log.hashed_otp):
-            log.attempts += 1
-            if log.attempts >= 3:
-                log.locked_until = now + timedelta(minutes=10)
-            log.save(update_fields=["attempts", "locked_until"])
-            return "invalid"
+            # OTP has expired
+            if now > log.expires_at:
+                return "expired", log
 
-        # Success
-        log.is_verified = True
-        log.save(update_fields=["is_verified"])
-        return "success"
+            # Verify the hash
+            if not check_password(raw_otp, log.hashed_otp):
+                log.attempts += 1
+                if log.attempts >= 3:
+                    log.locked_until = now + timedelta(minutes=10)
+                log.save(update_fields=["attempts", "locked_until"])
+                return "invalid", log
+
+            # Success
+            log.is_verified = True
+            log.save(update_fields=["is_verified"])
+            return "success", log
+
 
     # ---- dunder ------------------------------------------------------------
 
@@ -510,11 +523,18 @@ class AdminBranch(TimeStampedModel):
                          "assigned to a branch."}
             )
 
-        if self.assigned_by_id and self.assigned_by.role != "super_admin":
-            raise ValidationError(
-                {"assigned_by": "Only a super_admin can assign branch "
-                                "admins."}
-            )
+        if self.assigned_at and not self._state.adding:
+            # Prevent reassigning admin to a different branch without explicit deletion.
+            try:
+                old = AdminBranch.objects.get(pk=self.pk)
+                if old.branch_id != self.branch_id:
+                    raise ValidationError(
+                        {"branch": "Cannot reassign admin to a different branch. "                                    "Delete this record and create a new one."}
+                    )
+            except AdminBranch.DoesNotExist:
+                pass
 
-    def __str__(self) -> str:
-        return f"{self.user.phone} → {self.branch.name}"
+    class Meta:
+        verbose_name = "admin branch assignment"
+        verbose_name_plural = "admin branch assignments"
+        unique_together = [("user",)]  # one branch per admin

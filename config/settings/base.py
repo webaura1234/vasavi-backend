@@ -64,6 +64,7 @@ THIRD_PARTY_APPS = [
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "axes",
+    "django_celery_beat",  # DB-backed periodic task scheduler
 ]
 
 LOCAL_APPS = [
@@ -160,7 +161,7 @@ REST_FRAMEWORK = {
         "otp_verify": "3/10minute",
         "staff_otp_send": "5/hour",
         "staff_otp_verify": "3/10minute",
-        "booking_create": "10/hour",
+        "booking_create": "30/hour",
         "payment": "20/hour",
     },
     "DEFAULT_PAGINATION_CLASS": "utils.pagination.VasaviPagination",
@@ -506,6 +507,5 @@ IDEMPOTENCY_EXCLUDED_PREFIXES = [
     "/api/v1/staff/token/refresh/",
     "/api/accounts/otp/",
     "/api/accounts/token/refresh/",
-    "/api/staff/otp/",
     "/api/staff/token/refresh/",
 ]

@@ -163,6 +163,9 @@ class Coupon(SoftDeleteModel):
 
     # -- choices -------------------------------------------------------------
     class CouponType(models.TextChoices):
+        # Backend types → Frontend mapping (in vasavi-main-site/lib/api/mappers.ts):
+        #   "concession" → "percentage_discount"
+        #   "free"       → "free_booking"
         CONCESSION = "concession", "Concession"
         FREE = "free", "Free"
 
@@ -240,6 +243,8 @@ class Coupon(SoftDeleteModel):
         ordering = ["serial_number"]
         indexes = [
             models.Index(fields=["status"], name="idx_coupon_status"),
+            # Speeds up batch dispatch queries (batch.coupons.filter(status=...))
+            models.Index(fields=["batch", "status"], name="idx_coupon_batch_status"),
         ]
 
     # -- str -----------------------------------------------------------------

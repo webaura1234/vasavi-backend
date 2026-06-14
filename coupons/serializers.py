@@ -98,8 +98,19 @@ class CouponBatchCreateSerializer(serializers.Serializer):
                 extra_benefit=validated_data.get("extra_benefit", ""),
             )
             if assigned:
-                for coupon in batch.coupons.all():
-                    coupon.assigned_donors.set(assigned)
+                # Bulk-insert all M2M rows in 1–2 queries instead of N×set()
+                # calls (one UPDATE per coupon).  ignore_conflicts handles the
+                # rare case where a row already exists (idempotent).
+                CouponAssignment = Coupon.assigned_donors.through
+                coupon_pks = list(batch.coupons.values_list("pk", flat=True))
+                through_rows = [
+                    CouponAssignment(coupon_id=c_pk, user_id=u.pk)
+                    for c_pk in coupon_pks
+                    for u in assigned
+                ]
+                CouponAssignment.objects.bulk_create(
+                    through_rows, ignore_conflicts=True
+                )
         return batch
 
 
@@ -195,19 +206,5 @@ class CouponRedeemSerializer(serializers.Serializer):
         try:
             booking = Booking.objects.get(pk=attrs["booking_id"], user=request.user)
         except Booking.DoesNotExist as exc:
-            raise serializers.ValidationError({"booking_id": "Booking not found."}) from exc
-
-        if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
-            raise serializers.ValidationError(
-                {"booking_id": "Booking cannot accept coupons in this status."}
-            )
-
-        same_type = booking.coupons_applied.filter(coupon_type=coupon.coupon_type)
-        if same_type.exists():
-            raise serializers.ValidationError(
-                {"coupon_id": "Booking already has a coupon of this type."}
-            )
-
-        attrs["coupon"] = coupon
-        attrs["booking"] = booking
-        return attrs
+            raise serializers.ValidationError({"booking_id": "Booking not found or not associated with this user's booking."}
+            ) from exc

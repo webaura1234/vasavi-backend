@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import random
+import secrets
 import string
 
 from django.conf import settings
@@ -35,7 +35,7 @@ REFRESH_COOKIE = "vasavi_refresh"
 
 
 def _generate_otp_code() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    return "".join(secrets.choice(string.digits) for _ in range(6))
 
 
 def _issue_jwt_pair(user: User) -> tuple[str, str]:
@@ -49,7 +49,7 @@ def _set_refresh_cookie(response, refresh_token: str) -> None:
         refresh_token,
         max_age=30 * 24 * 3600,
         httponly=True,
-        secure=getattr(settings, "SESSION_COOKIE_SECURE", False),
+        secure=getattr(settings, "REFRESH_COOKIE_SECURE", not settings.DEBUG),
         samesite="Lax",
         path="/",
     )
@@ -61,7 +61,7 @@ def _clear_refresh_cookie(response) -> None:
         "",
         max_age=0,
         httponly=True,
-        secure=getattr(settings, "SESSION_COOKIE_SECURE", False),
+        secure=getattr(settings, "REFRESH_COOKIE_SECURE", not settings.DEBUG),
         samesite="Lax",
         path="/",
     )
@@ -157,13 +157,7 @@ class OTPVerifyView(APIView):
         phone = serializer.validated_data["phone"]
         otp = serializer.validated_data["otp"]
 
-        log = (
-            OTPLog.objects.filter(phone=phone, is_verified=False)
-            .order_by("-created_at")
-            .first()
-        )
-
-        result = OTPLog.verify(phone, otp)
+        result, log = OTPLog.verify(phone, otp)
 
         if result == "locked":
             locked_until = log.locked_until if log else None
@@ -343,8 +337,8 @@ class TokenRefreshView(APIView):
         try:
             refresh = RefreshToken(raw)
             user = User.objects.get(pk=refresh["user_id"])
-            access = str(refresh.access_token)
             new_refresh = RefreshToken.for_user(user)
+            access = str(new_refresh.access_token)
             try:
                 refresh.blacklist()
             except AttributeError:

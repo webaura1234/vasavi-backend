@@ -304,6 +304,12 @@ class Booking(SoftDeleteModel):
                 fields=["function_hall", "check_in_date", "check_out_date"],
                 name="idx_booking_hall_dates",
             ),
+            # Composite index for room availability checks — hit on every
+            # booking creation and room search (check_availability_with_lock).
+            models.Index(
+                fields=["room", "check_in_date", "check_out_date"],
+                name="idx_booking_room_dates",
+            ),
         ]
         constraints = [
             models.CheckConstraint(
@@ -633,8 +639,4 @@ class BookingExport(TimeStampedModel):
         ]
 
     def __str__(self) -> str:
-        return (
-            f"BookingExport [{self.status}] "
-            f"by {getattr(self.requested_by, 'phone', self.requested_by_id)} "
-            f"at {self.created_at}"
-        )
+        return f"BookingExport {self.pk} ({self.get_status_display()})"

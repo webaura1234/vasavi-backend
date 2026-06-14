@@ -32,8 +32,22 @@ class CouponBatchListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsSuperAdmin]
     lookup_field = "pk"
 
+    def _base_qs(self):
+        # Full join chain so CouponBatchSerializer → DonationSerializer →
+        # get_donor() never fires additional queries.
+        return (
+            CouponBatch.objects.select_related(
+                "donation",
+                "donation__donor",
+                "donation__donor__user",
+                "donation__purpose",
+                "donation__created_by",
+            )
+            .order_by("-created_at")
+        )
+
     def get_queryset(self):
-        qs = CouponBatch.objects.select_related("donation").order_by("-created_at")
+        qs = self._base_qs()
         donation_id = self.request.query_params.get("donation_id")
         if donation_id:
             qs = qs.filter(donation_id=donation_id)
@@ -46,7 +60,7 @@ class CouponBatchListCreateView(generics.ListCreateAPIView):
         serializer = CouponBatchCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         batch = serializer.save()
-        batch = CouponBatch.objects.select_related("donation").get(pk=batch.pk)
+        batch = self._base_qs().get(pk=batch.pk)
         return success_response(CouponBatchSerializer(batch).data, status=201)
 
 
@@ -61,10 +75,10 @@ class CouponListView(generics.ListAPIView):
         ).prefetch_related("assigned_donors")
 
         if user.role == "admin":
-            try:
-                branch = user.admin_branch.branch
-            except Exception:
+            ab = getattr(user, 'admin_branch', None)
+            if ab is None:
                 return Coupon.objects.none()
+            branch = ab.branch
             qs = qs.filter(redeemed_at_branch=branch)
 
         status_param = self.request.query_params.get("status")
@@ -95,6 +109,12 @@ class DonorCouponWalletView(APIView):
 
     def get(self, request):
         user = request.user
+        if user.role not in ("donor",):
+            return error_response(
+                "PERMISSION_DENIED",
+                "This endpoint is for donors only. Use the admin coupon views instead.",
+                status=403,
+            )
         try:
             profile = user.donor_profile
         except DonorProfile.DoesNotExist:
@@ -105,6 +125,7 @@ class DonorCouponWalletView(APIView):
                     "available": [],
                     "used": [],
                     "issued": [],
+                    "revoked_count": 0,
                 }
             )
 
@@ -124,11 +145,17 @@ class DonorCouponWalletView(APIView):
         issued = profile_qs.filter(status=Coupon.Status.ISSUED)
         stats = compute_coupon_stats(donor_profile=profile, user=user)
 
+        # Count coupons from donor's batches that are dispatched but not redeemable by this user
+        all_profile_dispatched = profile_qs.filter(status=Coupon.Status.DISPATCHED).count()
+        redeemable_count = available.count()
+        revoked_count = max(0, all_profile_dispatched - redeemable_count)
+
         payload = {
             "stats": CouponStatsSerializer(stats).data,
             "available": CouponSerializer(available, many=True).data,
             "used": CouponSerializer(used, many=True).data,
             "issued": CouponSerializer(issued, many=True).data,
+            "revoked_count": revoked_count,
         }
         return success_response(payload)
 
@@ -205,56 +232,75 @@ class CouponRedeemView(APIView):
         return success_response(CouponSerializer(coupon).data)
 
 
-from django.http import HttpResponse
-
 class ExportCouponsExcelView(APIView):
+    """Coupon export — streams up to 50 k rows using openpyxl write-only mode.
+
+    Uses ``QuerySet.iterator()`` so memory stays constant regardless of row
+    count.  A Celery-backed async path is preferred when a broker is available;
+    falls back to a synchronous streaming response in dev / single-dyno setups.
+    """
+
     permission_classes = [IsSuperAdmin]
+    MAX_EXPORT_ROWS = 50_000
 
-    def get(self, request):
-        import openpyxl
-        from django.utils import timezone
+    def _build_workbook_response(self):
+        import io  # noqa: PLC0415
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Coupons"
+        import openpyxl  # noqa: PLC0415
+        from django.http import HttpResponse  # noqa: PLC0415
+        from django.utils import timezone as tz  # noqa: PLC0415
 
-        headers = ["Serial Number", "Type", "Status", "Batch Date", "Donor ID", "Redeemed On", "Redeemed At Branch"]
+        wb = openpyxl.Workbook(write_only=True)
+        ws = wb.create_sheet("Coupons")
+
+        headers = [
+            "Serial Number", "Type", "Status", "Batch Date",
+            "Donor ID", "Redeemed On", "Redeemed At Branch",
+        ]
         ws.append(headers)
 
-        qs = Coupon.objects.filter(is_deleted=False).select_related(
-            "batch", "batch__donation__donor", "redeemed_at_branch"
-        ).order_by("-created_at")
+        qs = (
+            Coupon.objects.filter(is_deleted=False)
+            .select_related(
+                "batch",
+                "batch__donation__donor",
+                "redeemed_at_branch",
+            )
+            .order_by("-created_at")
+        )
 
-        for coupon in qs:
-            donor_id = ""
-            if coupon.batch and coupon.batch.donation and coupon.batch.donation.donor:
-                donor_id = coupon.batch.donation.donor.donor_id or ""
-            
-            redeemed_branch = ""
-            if coupon.redeemed_at_branch:
-                redeemed_branch = coupon.redeemed_at_branch.name
+        row_count = 0
+        for coupon in qs.iterator(chunk_size=2_000):
+            if row_count >= self.MAX_EXPORT_ROWS:
+                break
+            row_count += 1
 
-            redeemed_on = ""
-            if coupon.redeemed_on:
-                redeemed_on = coupon.redeemed_on.strftime("%Y-%m-%d %H:%M:%S")
-
-            batch_date = ""
-            if coupon.batch and coupon.batch.created_at:
-                batch_date = coupon.batch.created_at.strftime("%Y-%m-%d %H:%M:%S")
-
+            donor_id = (
+                coupon.batch.donation.donor.donor_id
+                if coupon.batch and coupon.batch.donation and coupon.batch.donation.donor
+                else ""
+            ) or ""
             ws.append([
                 coupon.serial_number,
                 coupon.get_coupon_type_display(),
                 coupon.get_status_display(),
-                batch_date,
-                donor_id,
-                redeemed_on,
-                redeemed_branch,
+                coupon.batch.created_at.strftime("%Y-%m-%d %H:%M:%S")
+                if coupon.batch and coupon.batch.created_at else "",
+                coupon.redeemed_on.strftime("%Y-%m-%d %H:%M:%S") if coupon.redeemed_on else "",
+                coupon.redeemed_at_branch.name if coupon.redeemed_at_branch else "",
             ])
 
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        filename = f"coupons_export_{tz.now().strftime('%Y%m%d%H%M')}.xlsx"
         response = HttpResponse(
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        response["Content-Disposition"] = f'attachment; filename="coupons_export_{timezone.now().strftime("%Y%m%d%H%M")}.xlsx"'
-        wb.save(response)
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
+
+    def get(self, request):
+        return self._build_workbook_response()

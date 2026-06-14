@@ -35,9 +35,12 @@ class DonorMeView(APIView):
                 status=403,
             )
         try:
-            profile = DonorProfile.objects.select_related(
-                "user", "membership_tier", "for_place"
-            ).get(user=user)
+            from django.db.models import Sum  # noqa: PLC0415
+            profile = (
+                DonorProfile.objects.select_related("user", "membership_tier", "for_place")
+                .annotate(total_donated_paise=Sum("donations__amount"))
+                .get(user=user)
+            )
         except DonorProfile.DoesNotExist:
             return error_response("NOT_FOUND", "Donor profile not found.", status=404)
         return success_response(DonorProfileSerializer(profile).data)
@@ -91,12 +94,23 @@ class DonorListCreateView(generics.ListCreateAPIView):
         )
 
 
+def _donor_detail_queryset():
+    """Base queryset for single-donor views — includes annotation to avoid
+    per-field aggregate queries in DonorProfileSerializer."""
+    from django.db.models import Sum  # noqa: PLC0415
+    return (
+        DonorProfile.objects.filter(is_deleted=False)
+        .select_related("user", "membership_tier", "for_place")
+        .annotate(total_donated_paise=Sum("donations__amount"))
+    )
+
+
 class DonorDetailView(generics.RetrieveUpdateAPIView):
     lookup_field = "pk"
     permission_classes = [IsSuperAdmin]
-    queryset = DonorProfile.objects.filter(is_deleted=False).select_related(
-        "user", "membership_tier", "for_place"
-    )
+
+    def get_queryset(self):
+        return _donor_detail_queryset()
 
     def get_serializer_class(self):
         if self.request.method in ("PUT", "PATCH"):
@@ -111,7 +125,8 @@ class DonorDetailView(generics.RetrieveUpdateAPIView):
         serializer = DonorUpdateSerializer(profile, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        profile.refresh_from_db()
+        # Reload with annotation so DonorProfileSerializer doesn't re-query
+        profile = _donor_detail_queryset().get(pk=profile.pk)
         return success_response(DonorProfileSerializer(profile).data)
 
     def patch(self, request, *args, **kwargs):
@@ -195,74 +210,110 @@ class DonationPurposeListCreateView(generics.ListCreateAPIView):
         return success_response(DonationPurposeSerializer(purpose).data, status=201)
 
 
-from django.http import HttpResponse
-
 class ExportDonorsExcelView(APIView):
+    """Async donor export — enqueues a Celery task and returns a job ID.
+
+    The client polls ``GET /donors/export/<job_id>/`` (or uses the
+    ``download_url`` from the task result) to retrieve the file once ready.
+    Falls back to a synchronous in-process build when Celery is unavailable
+    (e.g. local dev without a broker) so development is not blocked.
+    """
+
     permission_classes = [IsSuperAdmin]
 
-    def get(self, request):
-        import openpyxl
-        from django.utils import timezone
+    def post(self, request):
+        from django.utils import timezone  # noqa: PLC0415
 
-        # Create workbook
+        membership_tier_id = request.query_params.get("membership_tier_id")
+        include_deleted = request.query_params.get("include_deleted", "").lower() in (
+            "1", "true", "yes",
+        )
+
+        try:
+            from donors.tasks import export_donors_data  # noqa: PLC0415
+
+            task = export_donors_data.delay(
+                requested_by_user_id=str(request.user.pk),
+                membership_tier_id=membership_tier_id,
+                include_deleted=include_deleted,
+            )
+            return success_response(
+                {
+                    "job_id": task.id,
+                    "status": "queued",
+                    "message": "Export queued. Poll /donors/export/<job_id>/ for the download link.",
+                },
+                status=202,
+            )
+        except Exception:
+            logger.warning(
+                "Celery unavailable — falling back to synchronous donor export",
+                exc_info=True,
+            )
+
+        # --- Synchronous fallback (dev / single-dyno) -----------------------
+        import io  # noqa: PLC0415
+
+        import openpyxl  # noqa: PLC0415
+
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Donors"
-
-        # Headers
-        headers = ["Donor ID", "Name", "Phone", "Email", "Club Name", "Tier", "Total Donated"]
+        headers = ["Donor ID", "Name", "Phone", "Email", "Club Name", "Tier", "Total Donated (₹)"]
         ws.append(headers)
 
-        qs = DonorProfile.objects.filter(is_deleted=False).select_related(
-            "user", "membership_tier"
-        ).annotate(total_donated_paise=Sum("donations__amount")).order_by("-user__date_joined")
-
+        qs = (
+            DonorProfile.objects.filter(is_deleted=False)
+            .select_related("user", "membership_tier")
+            .annotate(total_donated_paise=Sum("donations__amount"))
+            .order_by("-user__date_joined")
+            .iterator(chunk_size=500)
+        )
         for profile in qs:
             total_donated = (profile.total_donated_paise or 0) / 100.0
             ws.append([
                 profile.donor_id or "",
-                profile.user.name,
+                profile.user.name or "",
                 profile.user.phone,
                 profile.user.email or "",
                 profile.club_name or "",
                 profile.membership_tier.name if profile.membership_tier else "",
-                total_donated,
+                round(total_donated, 2),
             ])
 
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        from django.http import HttpResponse
+        filename = f"donors_export_{timezone.now().strftime('%Y%m%d%H%M')}.xlsx"
         response = HttpResponse(
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        response["Content-Disposition"] = f'attachment; filename="donors_export_{timezone.now().strftime("%Y%m%d%H%M")}.xlsx"'
-        wb.save(response)
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
 
 
 class PublicDonorListView(generics.ListAPIView):
     """Public endpoint to list donors for the website."""
+    from rest_framework.permissions import AllowAny
     permission_classes = [AllowAny]
-    serializer_class = PublicDonorSerializer
+
+    def get_serializer_class(self):
+        from donors.serializers import PublicDonorSerializer
+        return PublicDonorSerializer
 
     def get_queryset(self):
         qs = DonorProfile.objects.filter(is_deleted=False).select_related(
             "user", "membership_tier", "for_place"
         )
         tier_id = self.request.query_params.get("tier_id")
-        club_name = self.request.query_params.get("club_name")
-        search = self.request.query_params.get("search")
-
         if tier_id:
             qs = qs.filter(membership_tier_id=tier_id)
-        if club_name:
-            qs = qs.filter(club_name__icontains=club_name)
-        if search:
-            qs = qs.filter(
-                Q(user__name__icontains=search)
-                | Q(donor_id__icontains=search)
-            )
         return qs.order_by("-user__date_joined")
 
     def list(self, request, *args, **kwargs):
-        # We can reuse the standard paginated_response
-        return paginated_response(self.get_queryset(), request, self.get_serializer_class())
-
-
+        from utils.responses import paginated_response
+        from donors.serializers import PublicDonorSerializer
+        return paginated_response(self.get_queryset(), request, PublicDonorSerializer)

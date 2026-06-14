@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import random
+import secrets
 import string
 
 from django.db import transaction
@@ -179,6 +179,11 @@ class DonorProfileSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_total_donated_paise(self, obj: DonorProfile) -> int:
+        # Prefer the annotation injected by DonorListCreateView / DonorDetailView
+        # (avoids a per-row aggregate query in list contexts).
+        annotated = getattr(obj, "total_donated_paise", None)
+        if annotated is not None:
+            return int(annotated)
         total = obj.donations.aggregate(total=Sum("amount"))["total"]
         return int(total or 0)
 
@@ -213,10 +218,10 @@ class DonorProfileSerializer(serializers.ModelSerializer):
 
 def _generate_donor_id() -> str:
     year = timezone.now().year
-    digits = "".join(random.choices(string.digits, k=5))
+    digits = "".join(secrets.choice(string.digits) for _ in range(5))
     candidate = f"VCI-{year}-{digits}"
     while DonorProfile.all_objects.filter(donor_id=candidate).exists():
-        digits = "".join(random.choices(string.digits, k=5))
+        digits = "".join(secrets.choice(string.digits) for _ in range(5))
         candidate = f"VCI-{year}-{digits}"
     return candidate
 
@@ -474,12 +479,4 @@ class PublicDonorSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DonorProfile
-        fields = (
-            "id",
-            "donor_id",
-            "name",
-            "tier",
-            "club_name",
-            "district_code",
-        )
-        read_only_fields = fields
+        fields = ("id", "donor_id", "name", "tier")

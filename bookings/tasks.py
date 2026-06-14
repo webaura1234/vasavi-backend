@@ -128,7 +128,7 @@ def expire_pending_bookings(self) -> dict:
     return {"expired_bookings_cancelled": cancelled_count}
 
 
-@shared_task(name="bookings.tasks.send_booking_confirmation_task", bind=True, max_retries=3)
+@shared_task(name="bookings.tasks.send_booking_confirmation", bind=True, max_retries=3, default_retry_delay=60)
 def send_booking_confirmation_task(self, booking_id: str) -> dict:
     """Queue a booking confirmation email/SMS asynchronously."""
     from bookings.services.notifications import send_booking_confirmation
@@ -159,6 +159,47 @@ def booking_status_notification(
         logger.exception(
             "Failed to send status notification for booking %s", booking_id
         )
+        raise self.retry(exc=exc, countdown=60)
+
+
+@shared_task(
+    name="bookings.tasks.razorpay_create_order",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+)
+def razorpay_create_order(self, *, booking_id: str) -> dict:
+    """Create a Razorpay payment order asynchronously.
+
+    Dormant until ``RAZORPAY_ENABLED=True`` — kept here so the Celery
+    route is registered and the task name resolves without ImportError.
+    """
+    from bookings.services.razorpay import create_razorpay_order  # noqa: PLC0415
+
+    try:
+        return create_razorpay_order(booking_id=booking_id)
+    except Exception as exc:
+        logger.exception("razorpay_create_order failed for booking %s", booking_id)
+        raise self.retry(exc=exc, countdown=30)
+
+
+@shared_task(
+    name="bookings.tasks.razorpay_verify_payment_webhook",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+)
+def razorpay_verify_payment_webhook(self, *, payload: dict, signature: str) -> dict:
+    """Verify and process an incoming Razorpay webhook asynchronously.
+
+    Dormant until ``RAZORPAY_ENABLED=True``.
+    """
+    from bookings.services.razorpay import process_razorpay_webhook  # noqa: PLC0415
+
+    try:
+        return process_razorpay_webhook(payload=payload, signature=signature)
+    except Exception as exc:
+        logger.exception("razorpay_verify_payment_webhook failed")
         raise self.retry(exc=exc, countdown=60)
 
 
@@ -213,18 +254,16 @@ def cleanup_expired_booking_exports(self) -> dict:
     to avoid accidentally removing still-processing jobs.
     """
     import os
-
     from django.utils import timezone
-
     from bookings.models import BookingExport
 
-    now     = timezone.now()
+    now = timezone.now()
     expired = BookingExport.objects.filter(
         status=BookingExport.Status.READY,
         expires_at__lte=now,
     )
 
-    deleted_files  = 0
+    deleted_files = 0
     updated_records = 0
 
     for export in expired:
@@ -233,14 +272,12 @@ def cleanup_expired_booking_exports(self) -> dict:
                 os.remove(export.file_path)
                 deleted_files += 1
             except OSError:
-                logger.warning(
-                    "Could not delete export file: %s", export.file_path
-                )
+                logger.warning("Could not delete export file: %s", export.file_path)
 
-        export.status        = BookingExport.Status.FAILED
-        export.error_message = "Export expired — file deleted automatically."
-        export.file_path     = ""
-        export.download_url  = ""
+        export.status = BookingExport.Status.FAILED
+        export.error_message = "Export expired - file deleted automatically."
+        export.file_path = ""
+        export.download_url = ""
         export.save(update_fields=[
             "status", "error_message", "file_path", "download_url", "updated_at",
         ])
@@ -248,7 +285,6 @@ def cleanup_expired_booking_exports(self) -> dict:
 
     logger.info(
         "Booking export cleanup: deleted=%d records_updated=%d",
-        deleted_files,
-        updated_records,
+        deleted_files, updated_records,
     )
     return {"deleted_files": deleted_files, "updated_records": updated_records}

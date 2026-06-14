@@ -121,6 +121,13 @@ class Room(SoftDeleteModel):
         verbose_name = "room"
         verbose_name_plural = "rooms"
         ordering = ["branch", "room_number"]
+        indexes = [
+            # Filters room lists by branch while excluding soft-deleted / inactive.
+            models.Index(
+                fields=["branch", "is_deleted", "is_active"],
+                name="idx_room_branch_availability",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["branch", "room_number"],
@@ -276,4 +283,4 @@ class FunctionHallImage(TimeStampedModel):
         ordering = ["sort_order", "created_at"]
 
     def __str__(self) -> str:
-        return f"Image for {self.function_hall.name}"
+        return f"Image for {self.function_hall}"

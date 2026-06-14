@@ -35,15 +35,37 @@ logger = logging.getLogger("vasavi.bookings.views")
 
 
 def _booking_queryset_for_user(user):
-    """Scope bookings by role — branch admin uses AdminBranch FK, not query params."""
-    qs = Booking.objects.filter(is_deleted=False).select_related(
-        "user",
-        "room",
-        "room__room_type",
-        "function_hall",
-        "function_hall__branch",
-        "branch",
-    ).prefetch_related("coupons_applied")
+    """Scope bookings by role — branch admin uses AdminBranch FK, not query params.
+
+    All related objects are eagerly loaded to eliminate N+1 queries when
+    ``BookingSerializer`` renders its nested coupon graph.
+    """
+    qs = (
+        Booking.objects.filter(is_deleted=False)
+        .select_related(
+            "user",
+            "room",
+            "room__room_type",
+            "room__branch",
+            "function_hall",
+            "function_hall__branch",
+            "branch",
+            "cancelled_by",
+        )
+        .prefetch_related(
+            # Coupon M2M — pre-load the full nested graph so CouponSerializer
+            # never fires extra queries per coupon.
+            "coupons_applied",
+            "coupons_applied__batch",
+            "coupons_applied__batch__donation",
+            "coupons_applied__batch__donation__donor",
+            "coupons_applied__batch__donation__donor__user",
+            "coupons_applied__assigned_donors",
+            "coupons_applied__redeemed_by",
+            "coupons_applied__redeemed_at_booking",
+            "coupons_applied__redeemed_at_branch",
+        )
+    )
     if user.role in ("user", "donor"):
         return qs.filter(user=user)
     if user.role == "admin":
@@ -166,7 +188,7 @@ class BookingStatusUpdateView(APIView):
                 reason=reason,
             )
 
-        booking.refresh_from_db()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
         return success_response(BookingSerializer(booking).data)
 
 
@@ -201,7 +223,16 @@ class BookingExtendStayView(APIView):
         notes = serializer.validated_data.get("notes", "")
 
         extra_nights = (new_check_out - booking.check_out_date).days
-        extra_amount = booking.room.base_price_per_night * extra_nights
+        if booking.room:
+            extra_amount = booking.room.base_price_per_night * extra_nights
+        elif booking.function_hall:
+            extra_amount = booking.function_hall.base_price_per_day * extra_nights
+        else:
+            return error_response(
+                "VALIDATION_ERROR",
+                "Booking has no associated room or function hall.",
+                status=400,
+            )
 
         with transaction.atomic():
             old_check_out = booking.check_out_date
@@ -244,7 +275,7 @@ class BookingExtendStayView(APIView):
             changed_by_id=request.user.pk,
         )
 
-        booking.refresh_from_db()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
         return success_response(BookingSerializer(booking).data)
 
 
@@ -294,6 +325,7 @@ class BookingCancelView(APIView):
         with transaction.atomic():
             booking = Booking.objects.select_for_update().get(pk=booking.pk)
             old_status = booking.status
+            was_paid = booking.payment_status == Booking.PaymentStatus.PAID
             booking.status = Booking.Status.CANCELLED
             booking.cancelled_at = timezone.now()
             booking.cancellation_reason = reason
@@ -301,7 +333,7 @@ class BookingCancelView(APIView):
             booking.cancel_initiated_by_role = user.role
 
             # If the booking was paid, put refund in pending state
-            if booking.payment_status == Booking.PaymentStatus.PAID:
+            if was_paid:
                 booking.payment_status = Booking.PaymentStatus.REFUND_PENDING
                 booking.refund_requested_at = timezone.now()
                 booking.refund_requested_reason = reason
@@ -319,8 +351,8 @@ class BookingCancelView(APIView):
 
             booking.save(update_fields=save_fields)
 
-            # Revert coupons (only if payment wasn't made)
-            if booking.payment_status != Booking.PaymentStatus.PAID:
+            # Revert coupons only for unpaid bookings
+            if not was_paid:
                 _revert_booking_coupons(booking)
 
             BookingStatusLog.objects.create(
@@ -331,7 +363,7 @@ class BookingCancelView(APIView):
                 reason=reason,
             )
 
-        booking.refresh_from_db()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
         return success_response(BookingSerializer(booking).data)
 
 
@@ -397,7 +429,7 @@ class BookingRefundRequestView(APIView):
                 reason=f"Refund requested: {serializer.validated_data['reason']}",
             )
 
-        booking.refresh_from_db()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
         return success_response(BookingSerializer(booking).data)
 
 
@@ -495,7 +527,7 @@ class BookingCashPaymentView(APIView):
         except ValueError as exc:
             return error_response("VALIDATION_ERROR", str(exc), status=400)
 
-        booking.refresh_from_db()
+        booking = _booking_queryset_for_user(request.user).get(pk=booking.pk)
         return success_response(BookingSerializer(booking).data)
 
 
@@ -515,25 +547,4 @@ class BookingStatusLogView(generics.ListAPIView):
             if not branch_id:
                 return BookingStatusLog.objects.none()
             qs = qs.filter(booking__branch_id=branch_id)
-        return qs.order_by("-created_at")
-
-    def list(self, request, *args, **kwargs):
-        return paginated_response(self.get_queryset(), request, BookingStatusLogSerializer)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _revert_booking_coupons(booking: Booking) -> None:
-    """Revert all coupons on a booking back to DISPATCHED status."""
-    coupon_ids = list(booking.coupons_applied.values_list("pk", flat=True))
-    if coupon_ids:
-        Coupon.objects.filter(pk__in=coupon_ids).update(
-            status=Coupon.Status.DISPATCHED,
-            redeemed_by=None,
-            redeemed_at_booking=None,
-            redeemed_at_branch=None,
-            redeemed_on=None,
-        )
-        booking.coupons_applied.clear()
+    
