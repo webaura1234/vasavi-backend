@@ -20,6 +20,7 @@ from bookings.staff_analytics_views import (
 from bookings.staff_views import (
     StaffBookingExportRequestView,
     StaffBookingExportStatusView,
+    StaffBookingExportDownloadView,
     StaffBookingExportCountView,
     StaffBookingRefundView,
     StaffGuestLookupView,
@@ -102,6 +103,11 @@ urlpatterns = [
         "bookings/export/count/",
         StaffBookingExportCountView.as_view(),
         name="staff-bookings-export-count",
+    ),
+    path(
+        "bookings/export/<uuid:pk>/download/",
+        StaffBookingExportDownloadView.as_view(),
+        name="staff-bookings-export-download",
     ),
     path(
         "bookings/export/<uuid:pk>/",

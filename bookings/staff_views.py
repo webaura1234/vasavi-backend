@@ -5,9 +5,10 @@ from __future__ import annotations
 import csv
 import io
 import logging
+from pathlib import Path
 
 from django.db import transaction
-from django.http import HttpResponse
+from django.http import FileResponse, HttpResponse
 from django.utils import timezone
 from rest_framework import serializers as drf_serializers
 from rest_framework.views import APIView
@@ -228,27 +229,43 @@ class StaffRefundApprovalView(APIView):
 
 
 class StaffBookingExportRequestView(APIView):
-    """Create an async xlsx export job and enqueue the Celery task.
+    """Create or list async xlsx export jobs.
 
     POST /api/v1/staff/bookings/export/
+        Create a new export job (returns export_id, status, estimated_count).
 
-    Body (all optional):
-        date_from, date_to, status, payment_status,
-        room_type_id, room_number, payment_gateway,
-        guest_name, booking_reference, check_in_date
-        [super_admin only] branch_id, city
-
-    Returns:
-        { export_id, estimated_count, status: "pending" }
-
-    Security
-    --------
-    * Branch admin's branch_id is ALWAYS taken server-side from AdminBranch.
-      Any ``branch_id`` supplied in the body is silently ignored for role=admin.
-    * The export task re-validates scope from the stored ``filters_applied`` snapshot.
+    GET /api/v1/staff/bookings/export/
+        Paginated history of exports for the current user (super_admin sees all).
     """
 
     permission_classes = [IsAdminOrAbove]
+
+    def get(self, request):
+        from bookings.models import BookingExport
+        from bookings.services.export import serialize_booking_export
+
+        qs = (
+            BookingExport.objects.select_related("branch", "requested_by")
+            .order_by("-created_at")
+        )
+        if request.user.role != "super_admin":
+            qs = qs.filter(requested_by=request.user)
+
+        page = max(int(request.query_params.get("page", 1)), 1)
+        page_size = min(max(int(request.query_params.get("page_size", 20)), 1), 100)
+        start = (page - 1) * page_size
+        end = start + page_size
+        total = qs.count()
+        exports = qs[start:end]
+
+        return success_response({
+            "count": total,
+            "next": page * page_size < total,
+            "previous": page > 1,
+            "page": page,
+            "page_size": page_size,
+            "results": [serialize_booking_export(item) for item in exports],
+        })
 
     def post(self, request):
         from bookings.models import BookingExport
@@ -280,20 +297,36 @@ class StaffBookingExportRequestView(APIView):
             branch_id = (filters.get("branch_id") or None)
 
         export = BookingExport.objects.create(
-            requested_by   = user,
-            branch_id      = branch_id,
-            status         = BookingExport.Status.PENDING,
+            requested_by    = user,
+            branch_id       = branch_id,
+            status          = BookingExport.Status.PENDING,
             filters_applied = filters,
+            estimated_count = estimated_count,
+            progress_percent = 5,
         )
 
-        # Enqueue to the exports queue
-        generate_booking_export.apply_async(
-            kwargs={"export_id": str(export.pk)},
-            queue="exports",
-        )
+        export_id = str(export.pk)
+        enqueued = False
+        try:
+            generate_booking_export.apply_async(
+                kwargs={"export_id": export_id},
+                queue="exports",
+            )
+            enqueued = True
+        except Exception:
+            logger.warning(
+                "Celery unavailable — running booking export synchronously: id=%s",
+                export_id,
+                exc_info=True,
+            )
+            from bookings.services.export import run_booking_export
+
+            run_booking_export(export_id=export_id, requesting_user_id=None)
+            export.refresh_from_db()
 
         logger.info(
-            "Booking export enqueued: id=%s user=%s role=%s estimated=%s",
+            "Booking export %s: id=%s user=%s role=%s estimated=%s",
+            "enqueued" if enqueued else "completed_inline",
             export.pk,
             user.phone,
             user.role,
@@ -301,9 +334,10 @@ class StaffBookingExportRequestView(APIView):
         )
 
         return success_response({
-            "export_id":       str(export.pk),
-            "status":          export.status,
-            "estimated_count": estimated_count,
+            "export_id":         export_id,
+            "status":            export.status,
+            "estimated_count":   estimated_count,
+            "progress_percent":  export.progress_percent,
         }, status=202)
 
 
@@ -315,6 +349,9 @@ class StaffBookingExportStatusView(APIView):
     Returns:
         { export_id, status, download_url, record_count, error_message }
 
+    ``download_url`` is a staff-authenticated API path — not a public media URL.
+    The portal must fetch it with the user's bearer token (via its backend proxy).
+
     Security: only the requesting user can see their own export.
     Super admins can see any export for oversight.
     """
@@ -323,32 +360,98 @@ class StaffBookingExportStatusView(APIView):
 
     def get(self, request, pk):
         from bookings.models import BookingExport
+        from bookings.services.export import (
+            serialize_booking_export,
+            user_can_access_booking_export,
+        )
 
         try:
             export = BookingExport.objects.select_related("branch").get(pk=pk)
         except (BookingExport.DoesNotExist, Exception):
             return error_response("NOT_FOUND", "Export job not found.", status=404)
 
-        # Ownership check — user can only see own exports; super_admin sees all
-        if (
-            request.user.role != "super_admin"
-            and export.requested_by_id != request.user.pk
-        ):
+        if not user_can_access_booking_export(export, request.user):
             return error_response(
                 "PERMISSION_DENIED",
                 "You do not have access to this export.",
                 status=403,
             )
 
-        return success_response({
-            "export_id":       str(export.pk),
-            "status":          export.status,
-            "download_url":    export.download_url or None,
-            "record_count":    export.record_count,
-            "error_message":   export.error_message or None,
-            "created_at":      export.created_at.isoformat() if export.created_at else None,
-            "expires_at":      export.expires_at.isoformat() if export.expires_at else None,
-        })
+        return success_response(serialize_booking_export(export))
+
+
+class StaffBookingExportDownloadView(APIView):
+    """Download a completed booking export (.xlsx).
+
+    GET /api/v1/staff/bookings/export/{pk}/download/
+
+    Streams the file with ``Content-Disposition: attachment`` after verifying
+    ownership and expiry. Never expose files via unauthenticated ``/media/``.
+    """
+
+    permission_classes = [IsAdminOrAbove]
+
+    def get(self, request, pk):
+        from bookings.models import BookingExport
+        from bookings.services.export import (
+            export_is_downloadable,
+            user_can_access_booking_export,
+        )
+
+        try:
+            export = BookingExport.objects.get(pk=pk)
+        except BookingExport.DoesNotExist:
+            return error_response("NOT_FOUND", "Export job not found.", status=404)
+
+        if not user_can_access_booking_export(export, request.user):
+            return error_response(
+                "PERMISSION_DENIED",
+                "You do not have access to this export.",
+                status=403,
+            )
+
+        if export.status in (
+            BookingExport.Status.PENDING,
+            BookingExport.Status.PROCESSING,
+        ):
+            return error_response(
+                "NOT_READY",
+                "Export is still being generated. Please try again shortly.",
+                status=409,
+            )
+
+        if export.status == BookingExport.Status.FAILED:
+            return error_response(
+                "EXPORT_FAILED",
+                export.error_message or "Export generation failed.",
+                status=410,
+            )
+
+        if export.expires_at and export.expires_at <= timezone.now():
+            return error_response(
+                "EXPIRED",
+                "This export has expired. Please generate a new export.",
+                status=410,
+            )
+
+        if not export_is_downloadable(export):
+            return error_response(
+                "NOT_FOUND",
+                "Export file is no longer available.",
+                status=404,
+            )
+
+        filename = Path(export.file_path).name
+        response = FileResponse(
+            open(export.file_path, "rb"),
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            as_attachment=True,
+            filename=filename,
+        )
+        response["Cache-Control"] = "private, no-store"
+        return response
 
 
 class StaffBookingExportCountView(APIView):

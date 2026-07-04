@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from django.conf import settings
 from django.db.models import QuerySet
@@ -22,6 +22,60 @@ from bookings.models import Booking
 from bookings.query_filters import apply_booking_export_filters
 
 logger = logging.getLogger("vasavi.bookings.export")
+
+
+def booking_export_download_api_path(export_id: str) -> str:
+    """Staff-authenticated download route (never expose raw MEDIA URLs to the portal)."""
+    return f"/api/v1/staff/bookings/export/{export_id}/download/"
+
+
+def user_can_access_booking_export(export, user) -> bool:
+    if user.role == "super_admin":
+        return True
+    return export.requested_by_id == user.pk
+
+
+def export_is_downloadable(export) -> bool:
+    from bookings.models import BookingExport
+
+    if export.status != BookingExport.Status.READY:
+        return False
+    if export.expires_at and export.expires_at <= timezone.now():
+        return False
+    if not export.file_path:
+        return False
+    return Path(export.file_path).is_file()
+
+
+def serialize_booking_export(export, *, include_filters: bool = True) -> dict[str, Any]:
+    """JSON payload for list/status endpoints."""
+    download_url = None
+    if export_is_downloadable(export):
+        download_url = booking_export_download_api_path(str(export.pk))
+
+    filters = {}
+    if include_filters and export.filters_applied:
+        filters = {
+            k: v
+            for k, v in export.filters_applied.items()
+            if not str(k).startswith("_") and v not in (None, "", "all")
+        }
+
+    branch_name = export.branch.name if getattr(export, "branch", None) else "All branches"
+
+    return {
+        "export_id": str(export.pk),
+        "status": export.status,
+        "progress_percent": export.progress_percent or 0,
+        "estimated_count": export.estimated_count,
+        "record_count": export.record_count,
+        "download_url": download_url,
+        "error_message": export.error_message or None,
+        "created_at": export.created_at.isoformat() if export.created_at else None,
+        "expires_at": export.expires_at.isoformat() if export.expires_at else None,
+        "branch_name": branch_name,
+        "filters_applied": filters,
+    }
 
 # ---------------------------------------------------------------------------
 # Column definitions — single source of truth
@@ -194,7 +248,13 @@ def _booking_to_row(b: Booking) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def build_bookings_xlsx(qs: QuerySet, file_path: Path) -> int:
+def build_bookings_xlsx(
+    qs: QuerySet,
+    file_path: Path,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    progress_total_hint: int | None = None,
+) -> int:
     """Write an xlsx export file to *file_path* and return the row count.
 
     Design decisions
@@ -243,6 +303,8 @@ def build_bookings_xlsx(qs: QuerySet, file_path: Path) -> int:
     col_widths: dict[int, int] = {
         i: len(h) for i, h in enumerate(EXPORT_HEADERS, start=1)
     }
+    progress_hint = progress_total_hint or 0
+    last_reported_pct = -1
 
     for booking in qs.iterator(chunk_size=1000):
         row_count += 1
@@ -258,6 +320,12 @@ def build_bookings_xlsx(qs: QuerySet, file_path: Path) -> int:
 
             # Track max content width for auto-fit
             col_widths[col_idx] = max(col_widths[col_idx], len(str(value)))
+
+        if on_progress and progress_hint > 0 and row_count % 100 == 0:
+            pct = min(95, 15 + int(80 * row_count / progress_hint))
+            if pct != last_reported_pct:
+                last_reported_pct = pct
+                on_progress(pct, row_count)
 
     # -- auto column widths ---------------------------------------------------
     # Cap at 60 chars to avoid excessively wide columns (e.g. long notes).
@@ -306,10 +374,11 @@ def run_booking_export(
 
     User = get_user_model()
 
-    export = BookingExport.objects.select_related("requested_by").get(pk=export_id)
+    export = BookingExport.objects.select_related("requested_by", "branch").get(pk=export_id)
     export.status           = BookingExport.Status.PROCESSING
+    export.progress_percent = 10
     export.export_started_at = timezone.now()
-    export.save(update_fields=["status", "export_started_at", "updated_at"])
+    export.save(update_fields=["status", "progress_percent", "export_started_at", "updated_at"])
 
     try:
         requesting_user = export.requested_by
@@ -317,20 +386,34 @@ def run_booking_export(
 
         # Build scoped queryset — select_related prevents N+1
         qs = build_booking_export_queryset(filters, requesting_user)
+        progress_total = export.estimated_count or qs.count()
+        if export.estimated_count is None:
+            export.estimated_count = progress_total
+            export.save(update_fields=["estimated_count", "updated_at"])
+
+        export.progress_percent = 15
+        export.save(update_fields=["progress_percent", "updated_at"])
 
         # Resolve output path
         export_dir = Path(getattr(settings, "BOOKING_EXPORT_DIR",
                                   Path(settings.MEDIA_ROOT) / "exports" / "bookings"))
         export_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = timezone.now().strftime("%Y%m%d_%H%M%S")
-        filename  = f"bookings_export_{export_id[:8]}_{timestamp}.xlsx"
-        file_path = export_dir / filename
+        timestamp  = timezone.now().strftime("%Y%m%d_%H%M%S")
+        filename   = f"bookings_export_{export_id[:8]}_{timestamp}.xlsx"
+        file_path  = export_dir / filename
 
-        record_count = build_bookings_xlsx(qs, file_path)
+        def _report_progress(pct: int, _rows: int) -> None:
+            BookingExport.objects.filter(pk=export_id).update(progress_percent=pct)
 
-        relative       = file_path.relative_to(settings.MEDIA_ROOT)
-        download_url   = f"{settings.MEDIA_URL}{relative.as_posix()}"
+        record_count = build_bookings_xlsx(
+            qs,
+            file_path,
+            on_progress=_report_progress,
+            progress_total_hint=progress_total,
+        )
+
+        download_url   = booking_export_download_api_path(str(export_id))
         retention_days = getattr(settings, "BOOKING_EXPORT_RETENTION_DAYS", 7)
         expires_at     = timezone.now() + timedelta(days=retention_days)
 
@@ -338,10 +421,11 @@ def run_booking_export(
         export.file_path          = str(file_path)
         export.download_url       = download_url
         export.record_count       = record_count
+        export.progress_percent   = 100
         export.expires_at         = expires_at
         export.export_finished_at = timezone.now()
         export.save(update_fields=[
-            "status", "file_path", "download_url", "record_count",
+            "status", "file_path", "download_url", "record_count", "progress_percent",
             "expires_at", "export_finished_at", "updated_at",
         ])
 

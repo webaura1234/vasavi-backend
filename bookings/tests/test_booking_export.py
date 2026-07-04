@@ -2,8 +2,10 @@
 
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
+from django.conf import settings
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -184,3 +186,105 @@ class BookingExportTests(TestCase):
         client_other = self._get_authenticated_client(other_admin)
         response_other = client_other.get(f"/api/v1/staff/bookings/export/{export.pk}/")
         self.assertEqual(response_other.status_code, 403)
+
+    def test_export_download_requires_ready_file(self):
+        export = BookingExport.objects.create(
+            requested_by=self.admin_a,
+            branch=self.branch_a,
+            status=BookingExport.Status.PENDING,
+            filters_applied={},
+        )
+        client = self._get_authenticated_client(self.admin_a)
+        response = client.get(f"/api/v1/staff/bookings/export/{export.pk}/download/")
+        self.assertEqual(response.status_code, 409)
+
+    def test_export_download_streams_ready_file(self):
+        from bookings.services.export import booking_export_download_api_path
+
+        export_dir = Path(settings.BOOKING_EXPORT_DIR)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / f"bookings_export_{uuid.uuid4().hex[:8]}_test.xlsx"
+        file_path.write_bytes(b"PK\x03\x04test")
+
+        export = BookingExport.objects.create(
+            requested_by=self.admin_a,
+            branch=self.branch_a,
+            status=BookingExport.Status.READY,
+            filters_applied={},
+            file_path=str(file_path),
+            download_url=booking_export_download_api_path(str(uuid.uuid4())),
+            record_count=1,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+
+        client = self._get_authenticated_client(self.admin_a)
+        response = client.get(f"/api/v1/staff/bookings/export/{export.pk}/download/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            response["Content-Type"],
+        )
+        self.assertIn("attachment", response["Content-Disposition"])
+        self.assertEqual(b"".join(response.streaming_content), b"PK\x03\x04test")
+
+        file_path.unlink(missing_ok=True)
+
+    def test_export_status_returns_api_download_url_when_ready(self):
+        from bookings.services.export import booking_export_download_api_path
+
+        export_dir = Path(settings.BOOKING_EXPORT_DIR)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / f"bookings_export_{uuid.uuid4().hex[:8]}_status.xlsx"
+        file_path.write_bytes(b"ready")
+
+        export = BookingExport.objects.create(
+            requested_by=self.super_admin,
+            branch=None,
+            status=BookingExport.Status.READY,
+            filters_applied={},
+            file_path=str(file_path),
+            download_url="/media/exports/bookings/old-path.xlsx",
+            record_count=20,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+
+        client = self._get_authenticated_client(self.super_admin)
+        response = client.get(f"/api/v1/staff/bookings/export/{export.pk}/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["status"], "ready")
+        self.assertEqual(
+            data["download_url"],
+            booking_export_download_api_path(str(export.pk)),
+        )
+
+        file_path.unlink(missing_ok=True)
+
+    def test_export_list_endpoint(self):
+        export_dir = Path(settings.BOOKING_EXPORT_DIR)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / f"bookings_export_{uuid.uuid4().hex[:8]}_list.xlsx"
+        file_path.write_bytes(b"list")
+
+        BookingExport.objects.create(
+            requested_by=self.admin_a,
+            branch=self.branch_a,
+            status=BookingExport.Status.READY,
+            filters_applied={"status": "confirmed"},
+            file_path=str(file_path),
+            record_count=3,
+            estimated_count=3,
+            progress_percent=100,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+
+        client = self._get_authenticated_client(self.admin_a)
+        response = client.get("/api/v1/staff/bookings/export/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertGreaterEqual(data["count"], 1)
+        self.assertTrue(data["results"])
+        self.assertIn("progress_percent", data["results"][0])
+        self.assertIn("download_url", data["results"][0])
+
+        file_path.unlink(missing_ok=True)

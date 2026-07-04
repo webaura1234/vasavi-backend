@@ -605,8 +605,21 @@ class BookingExport(TimeStampedModel):
     # -- result ---------------------------------------------------------------
 
     file_path    = models.CharField(max_length=500, blank=True, help_text="Absolute path on disk.")
-    download_url = models.CharField(max_length=500, blank=True, help_text="Relative MEDIA_URL path.")
+    download_url = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Staff API download path when READY (not a public media URL).",
+    )
     record_count = models.PositiveIntegerField(null=True, blank=True)
+    estimated_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Row estimate captured when the export was requested.",
+    )
+    progress_percent = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Generation progress (0–100) for live UI updates.",
+    )
     error_message = models.TextField(blank=True)
 
     # -- TTL ------------------------------------------------------------------
