@@ -35,10 +35,6 @@ db.sqlite3-journal
 staticfiles/
 media/
 
-# Migrations (generated locally — run makemigrations after clone)
-**/migrations/*.py
-!**/migrations/__init__.py
-
 # Environment & secrets
 .env
 .env.*

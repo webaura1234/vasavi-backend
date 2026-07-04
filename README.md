@@ -84,10 +84,9 @@ print(result.get(timeout=120))  # includes download_url
 
 ## Migrations
 
-Migration files are **gitignored** by design. After cloning, always run:
+Migration files are committed in git. After pulling new code:
 
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
