@@ -80,6 +80,6 @@ def send_otp_sms(phone: str, otp: str) -> bool:
 
     In DEBUG mode the console backend prints the OTP for local testing.
     """
-    message = f"Your Vasavi verification code is {otp}. Valid for 60 seconds."
+    message = f"Your Vasavi verification code is {otp}. Valid for 10 minutes."
     backend = _load_backend()
     return backend.send(phone, message)

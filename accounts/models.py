@@ -266,7 +266,7 @@ class OTPLog(TimeStampedModel):
 
     Security controls
     ~~~~~~~~~~~~~~~~~
-    * Each OTP expires 60 seconds after creation (``expires_at``).
+    * Each OTP expires 10 minutes after creation (``expires_at``).
     * After 3 consecutive failed attempts the record is **locked** for
       10 minutes (``locked_until``).
     * A maximum of 5 unverified OTPs per phone per hour is enforced by
@@ -307,7 +307,7 @@ class OTPLog(TimeStampedModel):
         help_text="If set, the OTP cannot be verified until this time.",
     )
     expires_at = models.DateTimeField(
-        help_text="Auto-set to created_at + 60 seconds on save.",
+        help_text="Auto-set to created_at + 10 minutes on save.",
     )
 
     class Meta:
@@ -332,7 +332,7 @@ class OTPLog(TimeStampedModel):
     def save(self, *args, **kwargs):
         """Auto-populate ``expires_at`` on first insert (UUID pk is set before save)."""
         if self._state.adding and not self.expires_at:
-            self.expires_at = timezone.now() + timedelta(seconds=60)
+            self.expires_at = timezone.now() + timedelta(minutes=10)
         super().save(*args, **kwargs)
 
     # ---- class-level helpers -----------------------------------------------

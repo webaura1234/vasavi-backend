@@ -114,7 +114,11 @@ class StaffOTPSendView(APIView):
                 extra={"retry_after_seconds": cooldown, "cooldown_seconds": cooldown},
             )
 
-        otp_code = _generate_otp_code()
+        if settings.DEBUG:
+            # Dev mode: fixed OTP so local testing doesn't depend on SMS/console.
+            otp_code = "000000"
+        else:
+            otp_code = _generate_otp_code()
         OTPLog.objects.create(
             phone=phone,
             hashed_otp=make_password(otp_code),
@@ -132,7 +136,7 @@ class StaffOTPSendView(APIView):
         return success_response(
             {
                 "ok": True,
-                "expires_in": 60,
+                "expires_in": 600,
                 "cooldown_seconds": 60,
             },
             message="OTP sent successfully.",
